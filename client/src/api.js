@@ -38,3 +38,16 @@ export const api = {
   // Server URL exposed for OAuth redirect
   serverUrl: URL,
 };
+
+// Phase 7: friends + matchmaking
+api.friends = {
+  list: () => request('/social/friends'),
+  search: (q) => request(`/social/friends/search?q=${encodeURIComponent(q)}`),
+  request: (userId) => request('/social/friends/request', { method: 'POST', body: JSON.stringify({ userId }) }),
+  respond: (friendshipId, accept) =>
+    request('/social/friends/respond', { method: 'POST', body: JSON.stringify({ friendshipId, accept }) }),
+  unfriend: (userId) => request('/social/friends/unfriend', { method: 'POST', body: JSON.stringify({ userId }) }),
+  invites: () => request('/social/invites'),
+  sendInvite: (toUserId, roomId) =>
+    request('/social/invites', { method: 'POST', body: JSON.stringify({ toUserId, roomId }) }),
+};
