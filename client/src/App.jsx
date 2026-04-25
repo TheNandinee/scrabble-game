@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { socket } from './socket.js';
 import { EVENTS } from './events.js';
-import Home from './components/Home.jsx';
 import Room from './components/Room.jsx';
 import ErrorBoundary from './components/ErrorBoundary.jsx';
 import AuthModal from './components/AuthModal.jsx';
@@ -16,6 +15,8 @@ import ModeSelect from './components/ModeSelect.jsx';
 import FriendsPanel from './components/FriendsPanel.jsx';
 import QueuePanel from './components/QueuePanel.jsx';
 import GameInviteToast from './components/GameInviteToast.jsx';
+import NamePrompt from './components/NamePrompt.jsx';
+import BotSetup from './components/BotSetup.jsx';
 
 export default function App() {
   const [connected, setConnected] = useState(socket.connected);
@@ -29,6 +30,10 @@ export default function App() {
   const [prefs, setPrefs] = useState(() => loadPrefs());
   const [friendsOpen, setFriendsOpen] = useState(false);
   const [queueOpen, setQueueOpen] = useState(false);
+  const [botSetupOpen, setBotSetupOpen] = useState(false);
+
+  // Name prompt: holds a deferred action that runs after the user enters a name
+  const [namePrompt, setNamePrompt] = useState(null);
 
   // Auth state
   const [user, setUser] = useState(null);
@@ -37,7 +42,6 @@ export default function App() {
   const [authModalMode, setAuthModalMode] = useState('signin');
   const [profileOpen, setProfileOpen] = useState(false);
 
-  // Routing (kept simple — single-page)
   const [route, setRoute] = useState(() => {
     const path = window.location.pathname;
     if (path === '/verify-email') return 'verify';
@@ -69,7 +73,6 @@ export default function App() {
       .then(({ user }) => setUser(user || null))
       .catch(() => setUser(null))
       .finally(() => setAuthChecked(true));
-    // Show auth_error if redirected back from OAuth failure
     const params = new URLSearchParams(window.location.search);
     if (params.get('auth_error')) {
       setError('Sign in failed. Please try again.');
@@ -134,7 +137,6 @@ export default function App() {
       flashToast(`Game over (${reason}).`, 5000);
       setRoom((r) => (r ? { ...r, status: 'finished', scores: finalScores } : r));
       playIfEnabled('win');
-      // Refresh user stats since they may have updated
       api.me().then(({ user }) => setUser(user || null)).catch(() => {});
     };
     const onPlayerJoined = ({ player }) => flashToast(`${player.name} joined`);
@@ -210,7 +212,6 @@ export default function App() {
   const handleAuthed = (u) => {
     setUser(u);
     flashToast(`Welcome, ${u.displayName}!`);
-    // Reconnect socket so the server can re-read the auth cookie
     if (!room) {
       socket.disconnect();
       socket.connect();
@@ -287,17 +288,60 @@ export default function App() {
     });
   });
 
-  // ----- Phase 7 mode-pick handlers -----
-  const handlePickFriend = ({ joinCode } = {}) => {
-    if (joinCode) {
-      handleJoinRoom(joinCode, user?.displayName || prefs.lastName || 'Player');
-    } else {
-      handleCreateRoom(user?.displayName || prefs.lastName || 'Player');
+  // ----- Mode-pick + name capture -----
+  const enterRoom = (action, name, joinCode) => {
+    if (action === 'create') handleCreateRoom(name);
+    else if (action === 'join') handleJoinRoom(joinCode, name);
+    else if (action === 'spectate') handleSpectateRoom(joinCode, name);
+  };
+
+  const requestEnter = (action, joinCode) => {
+    const known = user?.displayName || prefs.lastName || '';
+    if (known) {
+      enterRoom(action, known, joinCode);
+      return;
     }
+    setNamePrompt({
+      action,
+      joinCode,
+      title: action === 'spectate' ? '👀 Pick a spectator name' : '🎮 Pick a name',
+      ctaLabel:
+        action === 'create' ? 'Create Room'
+        : action === 'join' ? 'Join Room'
+        : 'Spectate',
+    });
+  };
+
+  const handlePickFriend = ({ joinCode } = {}) => {
+    requestEnter(joinCode ? 'join' : 'create', joinCode);
+  };
+
+  const handleSpectateFromUI = (code) => {
+    requestEnter('spectate', code);
   };
 
   const handleAcceptGameInvite = (roomId) => {
-    handleJoinRoom(roomId, user?.displayName || prefs.lastName || 'Player');
+    requestEnter('join', roomId);
+  };
+
+  const handleNameSubmit = (name) => {
+    if (!namePrompt) return;
+    setPrefs((p) => savePrefs({ lastName: name }));
+    enterRoom(namePrompt.action, name, namePrompt.joinCode);
+    setNamePrompt(null);
+  };
+
+  // ----- Bot game -----
+  const handleStartBotGame = ({ name, difficulty, numBots }) => {
+    setError('');
+    setBotSetupOpen(false);
+    socket.emit(EVENTS.CREATE_BOT_ROOM, { playerName: name, difficulty, numBots }, (res) => {
+      if (!res?.ok) return setError(res?.error || 'Failed to start bot game');
+      setMySeatId(res.seatId);
+      setRole('player');
+      setRoom(res.room);
+      persistSession(res, name);
+    });
   };
 
   const goHome = () => {
@@ -305,12 +349,11 @@ export default function App() {
     window.history.replaceState({}, '', '/');
   };
 
-  // ----- Render -----
   return (
     <ErrorBoundary>
       <div className="app">
         <header className="app-header">
-          <h1 onClick={goHome} style={{ cursor: 'pointer' }}>Scrabble Multiplayer</h1>
+          <h1 onClick={goHome} style={{ cursor: 'pointer' }}>Scrabble</h1>
           <div className="header-right">
             {authChecked && (
               user ? (
@@ -324,7 +367,7 @@ export default function App() {
                 </>
               ) : (
                 <>
-                  <button className="btn small" onClick={() => { setAuthModalMode('signin'); setAuthModalOpen(true); }}>
+                  <button className="btn small ghost" onClick={() => { setAuthModalMode('signin'); setAuthModalOpen(true); }}>
                     Sign in
                   </button>
                   <button className="btn small primary" onClick={() => { setAuthModalMode('signup'); setAuthModalOpen(true); }}>
@@ -337,7 +380,7 @@ export default function App() {
               {prefs.soundEnabled ? '🔊' : '🔇'}
             </button>
             <span className={`status-dot ${connected ? 'ok' : 'bad'}`}>
-              {connected ? 'Connected' : 'Reconnecting...'}
+              {connected ? 'Connected' : 'Reconnecting'}
             </span>
           </div>
         </header>
@@ -353,8 +396,8 @@ export default function App() {
             user={user}
             onPickFriend={handlePickFriend}
             onPickQuickMatch={() => setQueueOpen(true)}
-            onPickComputer={() => flashToast('Computer opponent coming in Phase 8!')}
-            onSpectate={(code) => handleSpectateRoom(code, user?.displayName || 'Spectator')}
+            onPickComputer={() => setBotSetupOpen(true)}
+            onSpectate={handleSpectateFromUI}
             onSignInClick={() => { setAuthModalMode('signin'); setAuthModalOpen(true); }}
           />
         )}
@@ -374,6 +417,14 @@ export default function App() {
             playSound={playIfEnabled}
           />
         )}
+
+        <NamePrompt
+          open={!!namePrompt}
+          onClose={() => setNamePrompt(null)}
+          onConfirm={handleNameSubmit}
+          title={namePrompt?.title}
+          ctaLabel={namePrompt?.ctaLabel}
+        />
 
         <AuthModal
           open={authModalOpen}
@@ -398,7 +449,12 @@ export default function App() {
         <QueuePanel
           open={queueOpen}
           onClose={() => setQueueOpen(false)}
-          onMatched={(_msg) => { /* handled by socket listener */ }}
+        />
+        <BotSetup
+          open={botSetupOpen}
+          onClose={() => setBotSetupOpen(false)}
+          onStart={handleStartBotGame}
+          defaultName={user?.displayName || ''}
         />
         <GameInviteToast onAccept={handleAcceptGameInvite} />
       </div>
