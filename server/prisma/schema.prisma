@@ -1,0 +1,138 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// USER (Phase 6 will add fields; for now placeholder for FK)
+// ============================================================
+model User {
+  id           String   @id @default(cuid())
+  // Phase 6 fields (added later, nullable for Phase 5):
+  email        String?  @unique
+  passwordHash String?
+  displayName  String?
+  emailVerified Boolean @default(false)
+  // Stats (filled by Phase 6+ as games complete):
+  rating       Int      @default(1200)
+  gamesPlayed  Int      @default(0)
+  gamesWon     Int      @default(0)
+  highestScore Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Relations
+  hostedRooms   Room[]   @relation("HostedRooms")
+  seats         Seat[]
+  movesMade     Move[]
+  friendsOf     Friendship[] @relation("UserFriendsOf")
+  friends       Friendship[] @relation("UserFriends")
+
+  @@index([rating])
+}
+
+// ============================================================
+// ROOM (replaces the in-memory Map)
+// ============================================================
+model Room {
+  id                String   @id @db.VarChar(8)         // 6-char code, but allow some headroom
+  hostUserId        String?                              // null for fully-anonymous rooms
+  hostSeatId        String?                              // current host seat (could change if host leaves)
+  status            String   @default("waiting")         // waiting | in_progress | finished | abandoned
+  // Game mode (Phase 7 sets this)
+  mode              String   @default("private")         // private | quick_match | vs_computer
+  // Snapshot of game state — board, bag, racks, scores, etc.
+  // Stored as JSON because the shape is well-defined and we never query into it.
+  gameState         Json     @default("{}")
+  currentTurnSeatId String?
+  turnOrder         String[] @default([])
+  turnNumber        Int      @default(0)
+  consecutivePasses Int      @default(0)
+  isFirstMove       Boolean  @default(true)
+
+  createdAt         DateTime @default(now())
+  lastActivityAt    DateTime @default(now()) @updatedAt
+  finishedAt        DateTime?
+
+  // Relations
+  host    User?  @relation("HostedRooms", fields: [hostUserId], references: [id])
+  seats   Seat[]
+  moves   Move[]
+
+  @@index([status])
+  @@index([lastActivityAt])
+  @@index([mode, status])
+}
+
+// ============================================================
+// SEAT (a player's slot in a room)
+// ============================================================
+model Seat {
+  id        String   @id @default(cuid())
+  roomId    String
+  userId    String?                            // null for anonymous players
+  name      String
+  // Seat-specific game state
+  rack      String[] @default([])              // their tiles, e.g. ["A","B","_","R"]
+  score     Int      @default(0)
+  position  Int                                // 0,1,2,... for turn order
+  isBot     Boolean  @default(false)
+  // Connection state
+  socketId  String?                            // current socket; null when disconnected
+  connected Boolean  @default(false)
+  joinedAt  DateTime @default(now())
+  leftAt    DateTime?
+
+  // Relations
+  room      Room  @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user      User? @relation(fields: [userId], references: [id])
+
+  @@index([roomId])
+  @@index([userId])
+}
+
+// ============================================================
+// MOVE (every action in the game, for replay / history / stats)
+// ============================================================
+model Move {
+  id         String   @id @default(cuid())
+  roomId     String
+  seatId     String                             // we keep raw ID so we can replay even if seat row is gone
+  userId     String?                            // for stats aggregation
+  turn       Int                                // turn number within the game
+  type       String                             // "move" | "pass" | "swap" | "timeout"
+  // Move details (denormalized JSON; nullable for non-tile moves)
+  placements Json?                              // [{ row, col, letter, blank }]
+  words      Json?                              // [{ word, score }]
+  score      Int      @default(0)
+  createdAt  DateTime @default(now())
+
+  room       Room  @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user       User? @relation(fields: [userId], references: [id])
+
+  @@index([roomId, turn])
+  @@index([userId])
+}
+
+// ============================================================
+// FRIENDSHIP (Phase 7 will use this; schema in place now)
+// ============================================================
+model Friendship {
+  id          String   @id @default(cuid())
+  userId      String
+  friendId    String
+  status      String   @default("pending")      // pending | accepted | blocked
+  createdAt   DateTime @default(now())
+  acceptedAt  DateTime?
+
+  user   User @relation("UserFriendsOf", fields: [userId], references: [id], onDelete: Cascade)
+  friend User @relation("UserFriends", fields: [friendId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, friendId])
+  @@index([userId, status])
+  @@index([friendId, status])
+}
