@@ -1,8 +1,6 @@
 import { PrismaClient } from '@prisma/client';
 import { log } from './logger.js';
 
-// Singleton — Prisma docs strongly recommend a single instance per process.
-// In dev, hot-reload can create multiple; this guards against that.
 const globalForPrisma = globalThis;
 
 export const prisma =
@@ -15,10 +13,31 @@ if (process.env.NODE_ENV !== 'production') {
   globalForPrisma.__prisma = prisma;
 }
 
-// Test connection on boot
-prisma.$connect()
-  .then(() => log.info('db.connect.ok'))
-  .catch((err) => {
-    log.error('db.connect.fail', { err: String(err) });
-    process.exit(1);
-  });
+// Retry the initial ping. Neon's free tier may take 5-10s to wake from suspend.
+async function pingWithRetry(maxAttempts = 5, baseDelayMs = 1500) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await prisma.$queryRaw`SELECT 1`;
+      log.info('db.connect.ok', { attempt });
+      return true;
+    } catch (err) {
+      const last = attempt === maxAttempts;
+      log.warn('db.connect.retry', {
+        attempt,
+        maxAttempts,
+        err: String(err).split('\n')[0],
+      });
+      if (last) {
+        log.error('db.connect.fail.final', { err: String(err) });
+        return false;
+      }
+      // Exponential-ish backoff (1.5s, 3s, 4.5s, 6s)
+      await new Promise((r) => setTimeout(r, baseDelayMs * attempt));
+    }
+  }
+  return false;
+}
+
+// Kick off the ping but don't await it here — the boot sequence in index.js
+// awaits it before listen() so we don't miss requests.
+export const dbReady = pingWithRetry();

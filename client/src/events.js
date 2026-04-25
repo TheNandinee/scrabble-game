@@ -41,6 +41,9 @@ export const EVENTS = {
   FRIENDS_UPDATE: 'friends_update',
   FRIEND_INVITE_RECEIVED: 'friend_invite_received',
   GAME_INVITE_RECEIVED: 'game_invite_received',
+  
+  // Client -> Server (gameplay)
+  CREATE_BOT_ROOM: 'create_bot_room',
 };
 
 export const MAX_PLAYERS = 6;

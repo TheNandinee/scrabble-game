@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { api } from '../api.js';
 
 export default function AuthModal({ open, onClose, onAuthed, defaultMode = 'signin' }) {
-  const [mode, setMode] = useState(defaultMode); // 'signin' | 'signup' | 'forgot'
+  const [mode, setMode] = useState(defaultMode);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [displayName, setDisplayName] = useState('');
@@ -32,7 +32,7 @@ export default function AuthModal({ open, onClose, onAuthed, defaultMode = 'sign
         onAuthed(user); onClose();
       } else if (mode === 'forgot') {
         await api.requestPasswordReset(email.trim());
-        setInfo("If that email is registered, we've sent a reset link.");
+        setInfo("If that email is registered, we've sent you a reset link.");
       }
     } catch (err) {
       setError(err?.message || 'Something went wrong');
@@ -41,18 +41,24 @@ export default function AuthModal({ open, onClose, onAuthed, defaultMode = 'sign
     }
   };
 
-  const startGoogle = () => {
-    window.location.href = `${api.serverUrl}/auth/google`;
+  const startGoogle = () => { window.location.href = `${api.serverUrl}/auth/google`; };
+
+  const headings = {
+    signin: { title: '👋 Welcome back', sub: 'Sign in to continue your game' },
+    signup: { title: '✨ Create account', sub: 'Save your stats and play with friends' },
+    forgot: { title: '🔑 Reset password', sub: "We'll send a reset link to your email" },
   };
+  const h = headings[mode];
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
-          <h3>
-            {mode === 'signin' ? 'Sign in' : mode === 'signup' ? 'Create account' : 'Reset password'}
-          </h3>
-          <button className="btn small" onClick={onClose}>✕</button>
+          <div>
+            <h3>{h.title}</h3>
+            <p className="muted" style={{ margin: '4px 0 0', fontSize: 13 }}>{h.sub}</p>
+          </div>
+          <button className="btn small ghost" onClick={onClose}>✕</button>
         </div>
 
         {error && <div className="error-banner">{error}</div>}
@@ -67,6 +73,8 @@ export default function AuthModal({ open, onClose, onAuthed, defaultMode = 'sign
                 value={displayName}
                 onChange={(e) => setDisplayName(e.target.value)}
                 maxLength={30}
+                placeholder="What others will see"
+                autoFocus
                 required
               />
             </label>
@@ -77,7 +85,9 @@ export default function AuthModal({ open, onClose, onAuthed, defaultMode = 'sign
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
+              placeholder="you@example.com"
               autoComplete="email"
+              autoFocus={mode !== 'signup'}
               required
             />
           </label>
@@ -88,14 +98,15 @@ export default function AuthModal({ open, onClose, onAuthed, defaultMode = 'sign
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
+                placeholder={mode === 'signup' ? 'At least 8 characters' : '••••••••'}
                 autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
                 minLength={8}
                 required
               />
             </label>
           )}
-          <button className="btn primary" type="submit" disabled={loading}>
-            {loading ? '...' : mode === 'signin' ? 'Sign in' : mode === 'signup' ? 'Sign up' : 'Send reset link'}
+          <button className="btn primary" type="submit" disabled={loading} style={{ width: '100%' }}>
+            {loading ? 'Loading...' : mode === 'signin' ? 'Sign in' : mode === 'signup' ? 'Create account' : 'Send reset link'}
           </button>
         </form>
 
@@ -103,7 +114,7 @@ export default function AuthModal({ open, onClose, onAuthed, defaultMode = 'sign
           <>
             <div className="divider"><span>or</span></div>
             <button className="btn google-btn" type="button" onClick={startGoogle}>
-              <span style={{ marginRight: 8 }}>🔐</span> Continue with Google
+              <span style={{ fontSize: 16 }}>🔐</span> Continue with Google
             </button>
           </>
         )}
@@ -112,7 +123,7 @@ export default function AuthModal({ open, onClose, onAuthed, defaultMode = 'sign
           {mode === 'signin' && (
             <>
               <button className="link-btn" type="button" onClick={() => setMode('signup')}>
-                Don't have an account? Sign up
+                Don't have an account? <strong>Sign up</strong>
               </button>
               <button className="link-btn" type="button" onClick={() => setMode('forgot')}>
                 Forgot password?
@@ -121,12 +132,12 @@ export default function AuthModal({ open, onClose, onAuthed, defaultMode = 'sign
           )}
           {mode === 'signup' && (
             <button className="link-btn" type="button" onClick={() => setMode('signin')}>
-              Already have an account? Sign in
+              Already have an account? <strong>Sign in</strong>
             </button>
           )}
           {mode === 'forgot' && (
             <button className="link-btn" type="button" onClick={() => setMode('signin')}>
-              Back to sign in
+              ← Back to sign in
             </button>
           )}
         </div>

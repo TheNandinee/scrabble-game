@@ -6,3 +6,8 @@ dist/
 *.log
 .vscode/
 .idea/
+dist/
+build/
+.vercel/
+.fly/
+fly.toml.bak

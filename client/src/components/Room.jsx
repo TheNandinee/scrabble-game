@@ -10,6 +10,7 @@ export default function Room({
   onLeave, onStart, onSubmitMove, onPass, onSwap,
   playSound,
 }) {
+  console.log('[Room debug]', { mySeatId, hostSeatId: room?.hostSeatId, isHost: room?.hostSeatId === mySeatId, roomKeys: Object.keys(room || {}), roomId: room?.id });
   const [pendingPlacements, setPendingPlacements] = useState([]);
   const [selectedRackIndex, setSelectedRackIndex] = useState(null);
   const [copied, setCopied] = useState(false);

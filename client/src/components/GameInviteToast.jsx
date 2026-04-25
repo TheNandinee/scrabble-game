@@ -15,9 +15,7 @@ export default function GameInviteToast({ onAccept }) {
 
   const accept = () => {
     socket.emit(EVENTS.GAME_INVITE_RESPOND, { inviteId: invite.inviteId, accept: true }, (res) => {
-      if (res?.ok && res.accepted && res.roomId) {
-        onAccept(res.roomId);
-      }
+      if (res?.ok && res.accepted && res.roomId) onAccept(res.roomId);
       setInvite(null);
     });
   };
@@ -30,12 +28,12 @@ export default function GameInviteToast({ onAccept }) {
   return (
     <div className="invite-toast">
       <div className="invite-content">
-        <div>
-          <strong>{invite.fromUser?.displayName || 'Someone'}</strong> invited you to a game
+        <div style={{ marginBottom: 8 }}>
+          🎮 <strong>{invite.fromUser?.displayName || 'Someone'}</strong> invited you to a game!
         </div>
-        <div className="row" style={{ marginTop: 8 }}>
+        <div className="row">
           <button className="btn small primary" onClick={accept}>Accept</button>
-          <button className="btn small" onClick={decline}>Decline</button>
+          <button className="btn small ghost" onClick={decline}>Decline</button>
         </div>
       </div>
     </div>

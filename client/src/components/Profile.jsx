@@ -5,15 +5,24 @@ export default function Profile({ user, onClose, onUpdated, onSignout }) {
   const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(true);
   const [editingName, setEditingName] = useState(false);
-  const [newName, setNewName] = useState(user.displayName);
+  const [newName, setNewName] = useState(user?.displayName || '');
   const [error, setError] = useState('');
 
+  // Keep newName in sync if user changes underneath us
   useEffect(() => {
+    setNewName(user?.displayName || '');
+  }, [user?.displayName]);
+
+  useEffect(() => {
+    if (!user) return;
     api.history()
       .then((r) => setHistory(r.history || []))
       .catch(() => setHistory([]))
       .finally(() => setLoading(false));
-  }, []);
+  }, [user]);
+
+  // Bail if no user — parent should not render us, but guard anyway
+  if (!user) return null;
 
   const saveName = async () => {
     setError('');
@@ -29,25 +38,21 @@ export default function Profile({ user, onClose, onUpdated, onSignout }) {
   const resendVerify = async () => {
     try {
       await api.resendVerification();
-      alert('Verification email sent.');
+      alert('Verification email sent! Check your inbox.');
     } catch (e) {
       alert(e?.message || 'Could not resend');
     }
   };
 
-  const winRate = user.gamesPlayed > 0
-    ? Math.round((user.gamesWon / user.gamesPlayed) * 100)
-    : 0;
-  const avgScore = user.gamesPlayed > 0
-    ? Math.round(user.totalScore / user.gamesPlayed)
-    : 0;
+  const winRate = user.gamesPlayed > 0 ? Math.round((user.gamesWon / user.gamesPlayed) * 100) : 0;
+  const avgScore = user.gamesPlayed > 0 ? Math.round(user.totalScore / user.gamesPlayed) : 0;
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal profile-modal" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
-          <h3>Profile</h3>
-          <button className="btn small" onClick={onClose}>✕</button>
+          <h3>👤 Profile</h3>
+          <button className="btn small ghost" onClick={onClose}>✕</button>
         </div>
 
         {error && <div className="error-banner">{error}</div>}
@@ -55,21 +60,28 @@ export default function Profile({ user, onClose, onUpdated, onSignout }) {
         <div className="profile-name-row">
           {editingName ? (
             <>
-              <input value={newName} onChange={(e) => setNewName(e.target.value)} maxLength={30} />
+              <input
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                maxLength={30}
+                autoFocus
+              />
               <button className="btn small primary" onClick={saveName}>Save</button>
-              <button className="btn small" onClick={() => { setEditingName(false); setNewName(user.displayName); }}>Cancel</button>
+              <button className="btn small ghost" onClick={() => { setEditingName(false); setNewName(user.displayName); }}>Cancel</button>
             </>
           ) : (
             <>
               <div className="profile-name">{user.displayName}</div>
-              <button className="btn small" onClick={() => setEditingName(true)}>Edit</button>
+              <button className="btn small ghost" onClick={() => setEditingName(true)}>Edit</button>
             </>
           )}
         </div>
-        <div className="muted">{user.email}{!user.emailVerified && ' · unverified'}</div>
-        {!user.emailVerified && (
-          <button className="link-btn" onClick={resendVerify}>Resend verification email</button>
-        )}
+        <div className="profile-email">
+          {user.email}
+          {!user.emailVerified && (
+            <> · <button className="link-btn" onClick={resendVerify}>verify</button></>
+          )}
+        </div>
 
         <div className="stats-grid">
           <div className="stat"><div className="stat-num">{user.rating}</div><div className="stat-label">Rating</div></div>
@@ -80,11 +92,13 @@ export default function Profile({ user, onClose, onUpdated, onSignout }) {
           <div className="stat"><div className="stat-num">{avgScore}</div><div className="stat-label">Avg</div></div>
         </div>
 
-        <h4>Recent games</h4>
+        <h4 className="subhead">Recent games</h4>
         {loading ? (
           <div className="muted">Loading...</div>
         ) : history.length === 0 ? (
-          <div className="muted">No finished games yet. Play one!</div>
+          <div className="muted" style={{ padding: 16, textAlign: 'center', background: 'var(--bg)', borderRadius: 'var(--radius)' }}>
+            🎮 No finished games yet. Play one!
+          </div>
         ) : (
           <ul className="history-list">
             {history.map((g) => (
@@ -98,7 +112,9 @@ export default function Profile({ user, onClose, onUpdated, onSignout }) {
         )}
 
         <div className="modal-footer">
-          <button className="btn danger" onClick={onSignout}>Sign out</button>
+          <button className="btn danger" onClick={onSignout} style={{ width: '100%' }}>
+            Sign out
+          </button>
         </div>
       </div>
     </div>
