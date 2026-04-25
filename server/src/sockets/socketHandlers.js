@@ -22,7 +22,6 @@ function sanitizeName(raw) {
   if (typeof raw !== 'string') return null;
   const trimmed = raw.trim().slice(0, NAME_MAX_LEN);
   if (trimmed.length < NAME_MIN_LEN) return null;
-  // Only allow visible characters; reject control codes
   if (!/^[\x20-\x7E]+$/.test(trimmed)) return null;
   return trimmed;
 }
@@ -130,7 +129,7 @@ function cancelTurnTimer(room) {
   if (room.turnTimer) room.turnTimer.cancel();
 }
 
-function onTurnTimeout(io, roomId) {
+async function onTurnTimeout(io, roomId) {
   const room = roomManager.getRoom(roomId);
   if (!room) return;
   if (room.gameState.status !== 'in_progress') return;
@@ -139,7 +138,12 @@ function onTurnTimeout(io, roomId) {
   const result = passTurn(room, seatId, { auto: true });
   if (!result.ok) return;
 
-  roomManager.updateGameState(roomId, result.newGameState, result.nextSeatId);
+  await roomManager.updateGameState(roomId, result.newGameState, result.nextSeatId, {
+    seatId,
+    turn: result.newGameState.turnNumber - 1,
+    type: 'timeout',
+  });
+
   io.to(roomId).emit(EVENTS.TURN_TIMEOUT, { seatId });
   broadcastRoom(io, room);
 
@@ -154,6 +158,7 @@ function onTurnTimeout(io, roomId) {
   }
 }
 
+// gate already supports async — we just need each handler to BE async
 function gate(socket, fn) {
   return async (...args) => {
     const ack = typeof args[args.length - 1] === 'function' ? args[args.length - 1] : null;
@@ -172,13 +177,13 @@ function gate(socket, fn) {
 // ---------- handlers ----------
 
 export function registerSocketHandlers(io, socket) {
-  socket.on(EVENTS.CREATE_ROOM, gate(socket, ({ playerName } = {}, ack) => {
+  socket.on(EVENTS.CREATE_ROOM, gate(socket, async ({ playerName } = {}, ack) => {
     const name = sanitizeName(playerName);
     if (!name) return ack?.({ ok: false, error: 'Invalid name' });
 
     const seatId = newSeatId();
     const seat = { seatId, socketId: socket.id, name, connected: true };
-    const room = roomManager.createRoom(seat);
+    const room = await roomManager.createRoom(seat);
 
     socket.join(room.id);
     socket.data.roomId = room.id;
@@ -191,7 +196,7 @@ export function registerSocketHandlers(io, socket) {
     broadcastRoom(io, room);
   }));
 
-  socket.on(EVENTS.JOIN_ROOM, gate(socket, ({ roomId, playerName } = {}, ack) => {
+  socket.on(EVENTS.JOIN_ROOM, gate(socket, async ({ roomId, playerName } = {}, ack) => {
     const id = sanitizeRoomCode(roomId);
     const name = sanitizeName(playerName);
     if (!id) return ack?.({ ok: false, error: 'Invalid room code' });
@@ -199,7 +204,7 @@ export function registerSocketHandlers(io, socket) {
 
     const seatId = newSeatId();
     const seat = { seatId, socketId: socket.id, name, connected: true };
-    const result = roomManager.joinRoom(id, seat);
+    const result = await roomManager.joinRoom(id, seat);
     if (result.error) return ack?.({ ok: false, error: result.error });
 
     socket.join(id);
@@ -214,8 +219,7 @@ export function registerSocketHandlers(io, socket) {
     broadcastRoom(io, result.room);
   }));
 
-  // ---------- SPECTATE ----------
-  socket.on(EVENTS.SPECTATE_ROOM, gate(socket, ({ roomId, spectatorName } = {}, ack) => {
+  socket.on(EVENTS.SPECTATE_ROOM, gate(socket, async ({ roomId, spectatorName } = {}, ack) => {
     const id = sanitizeRoomCode(roomId);
     const name = sanitizeName(spectatorName) || 'Spectator';
     if (!id) return ack?.({ ok: false, error: 'Invalid room code' });
@@ -234,14 +238,14 @@ export function registerSocketHandlers(io, socket) {
     broadcastRoom(io, result.room);
   }));
 
-  socket.on(EVENTS.REJOIN_ROOM, gate(socket, ({ reconnectToken } = {}, ack) => {
+  socket.on(EVENTS.REJOIN_ROOM, gate(socket, async ({ reconnectToken } = {}, ack) => {
     if (typeof reconnectToken !== 'string' || reconnectToken.length > 64) {
       return ack?.({ ok: false, error: 'Missing reconnect token' });
     }
     const record = reconnectTokens.consume(reconnectToken);
     if (!record) return ack?.({ ok: false, error: 'Reconnect token expired or invalid' });
 
-    const result = roomManager.rejoinRoom(record.roomId, record.seatId, socket.id);
+    const result = await roomManager.rejoinRoom(record.roomId, record.seatId, socket.id);
     if (result.error) return ack?.({ ok: false, error: result.error });
 
     socket.join(record.roomId);
@@ -273,7 +277,7 @@ export function registerSocketHandlers(io, socket) {
     }
   }));
 
-  socket.on(EVENTS.LEAVE_ROOM, gate(socket, (_p, ack) => {
+  socket.on(EVENTS.LEAVE_ROOM, gate(socket, async (_p, ack) => {
     const roomId = socket.data.roomId;
     const role = socket.data.role;
     if (roomId) {
@@ -284,7 +288,7 @@ export function registerSocketHandlers(io, socket) {
           io.to(roomId).emit(EVENTS.SPECTATOR_LEFT, { name: socket.data.spectatorName });
           broadcastRoom(io, room);
         } else if (socket.data.seatId) {
-          const res = roomManager.removeSeat(roomId, socket.data.seatId);
+          const res = await roomManager.removeSeat(roomId, socket.data.seatId);
           if (res && !res.deleted) {
             io.to(roomId).emit(EVENTS.PLAYER_LEFT, { seatId: socket.data.seatId });
             broadcastRoom(io, res.room);
@@ -299,13 +303,13 @@ export function registerSocketHandlers(io, socket) {
     ack?.({ ok: true });
   }));
 
-  socket.on(EVENTS.START_GAME, gate(socket, (_p, ack) => {
+  socket.on(EVENTS.START_GAME, gate(socket, async (_p, ack) => {
     const roomId = socket.data.roomId;
     const seatId = socket.data.seatId;
     if (!roomId || !seatId) return ack?.({ ok: false, error: 'Not in a room' });
     if (socket.data.role !== 'player') return ack?.({ ok: false, error: 'Spectators cannot start games' });
 
-    const result = roomManager.startGame(roomId, seatId);
+    const result = await roomManager.startGame(roomId, seatId);
     if (result.error) return ack?.({ ok: false, error: result.error });
 
     const room = result.room;
@@ -317,7 +321,7 @@ export function registerSocketHandlers(io, socket) {
     ack?.({ ok: true });
   }));
 
-  socket.on(EVENTS.SUBMIT_MOVE, gate(socket, ({ placements } = {}, ack) => {
+  socket.on(EVENTS.SUBMIT_MOVE, gate(socket, async ({ placements } = {}, ack) => {
     const roomId = socket.data.roomId;
     const seatId = socket.data.seatId;
     if (socket.data.role !== 'player') return ack?.({ ok: false, error: 'Spectators cannot move' });
@@ -337,7 +341,15 @@ export function registerSocketHandlers(io, socket) {
       return ack?.({ ok: false, error: result.error, invalidWords: result.invalidWords });
     }
 
-    roomManager.updateGameState(roomId, result.newGameState, result.nextSeatId);
+    await roomManager.updateGameState(roomId, result.newGameState, result.nextSeatId, {
+      seatId,
+      turn: result.newGameState.turnNumber - 1,
+      type: 'move',
+      placements: sane,
+      words: result.words,
+      score: result.score,
+    });
+
     const seat = getSeatForSocket(room, socket.id);
     sendRack(io, room, seat);
 
@@ -359,7 +371,7 @@ export function registerSocketHandlers(io, socket) {
     ack?.({ ok: true, score: result.score, words: result.words });
   }));
 
-  socket.on(EVENTS.PASS_TURN, gate(socket, (_p, ack) => {
+  socket.on(EVENTS.PASS_TURN, gate(socket, async (_p, ack) => {
     const roomId = socket.data.roomId;
     const seatId = socket.data.seatId;
     if (socket.data.role !== 'player') return ack?.({ ok: false, error: 'Spectators cannot pass' });
@@ -370,7 +382,10 @@ export function registerSocketHandlers(io, socket) {
     const result = passTurn(room, seatId);
     if (!result.ok) return ack?.({ ok: false, error: result.error });
 
-    roomManager.updateGameState(roomId, result.newGameState, result.nextSeatId);
+    await roomManager.updateGameState(roomId, result.newGameState, result.nextSeatId, {
+      seatId, turn: result.newGameState.turnNumber - 1, type: 'pass',
+    });
+
     broadcastRoom(io, room);
 
     if (result.newGameState.status === 'finished') {
@@ -385,7 +400,7 @@ export function registerSocketHandlers(io, socket) {
     ack?.({ ok: true });
   }));
 
-  socket.on(EVENTS.SWAP_TILES, gate(socket, ({ tiles } = {}, ack) => {
+  socket.on(EVENTS.SWAP_TILES, gate(socket, async ({ tiles } = {}, ack) => {
     const roomId = socket.data.roomId;
     const seatId = socket.data.seatId;
     if (socket.data.role !== 'player') return ack?.({ ok: false, error: 'Spectators cannot swap' });
@@ -399,7 +414,10 @@ export function registerSocketHandlers(io, socket) {
     const result = swapTiles(room, seatId, sane);
     if (!result.ok) return ack?.({ ok: false, error: result.error });
 
-    roomManager.updateGameState(roomId, result.newGameState, result.nextSeatId);
+    await roomManager.updateGameState(roomId, result.newGameState, result.nextSeatId, {
+      seatId, turn: result.newGameState.turnNumber - 1, type: 'swap',
+    });
+
     const seat = getSeatForSocket(room, socket.id);
     sendRack(io, room, seat);
     broadcastRoom(io, room);
