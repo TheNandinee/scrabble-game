@@ -15,6 +15,8 @@ import { prisma } from './db.js';
 import authRoutes from './auth/routes.js';
 import googleRoutes from './auth/google.js';
 import { attachUser, authenticateSocket } from './auth/middleware.js';
+import socialRoutes from './social/routes.js';
+import { initMatchmaker, notifyGameInvite } from './sockets/socketHandlers.js';
 
 const PORT = process.env.PORT || 4000;
 const allowedOrigins = (process.env.CLIENT_ORIGIN || 'http://localhost:5173')
@@ -44,6 +46,7 @@ app.get('/health', async (_req, res) => {
 
 app.use('/auth', authRoutes);
 app.use('/auth', googleRoutes);
+app.use('/social', socialRoutes);
 
 const httpServer = http.createServer(app);
 const io = new SocketIOServer(httpServer, {
@@ -52,7 +55,15 @@ const io = new SocketIOServer(httpServer, {
   pingInterval: 25_000,
   pingTimeout: 20_000,
   maxHttpBufferSize: 16_000,
+  
 });
+
+// Make io and helpers available to REST routes
+app.locals.io = io;
+app.locals.notifyGameInvite = notifyGameInvite;
+
+// Start matchmaker loop
+initMatchmaker(io);
 
 io.on('connection', (socket) => {
   // Phase 6: try to attach a userId from the auth cookie sent during the handshake

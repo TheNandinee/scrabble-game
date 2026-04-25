@@ -9,7 +9,118 @@ import { TurnTimer } from '../game/turnTimer.js';
 import { createSocketRateLimiter } from '../middleware/rateLimiter.js';
 import { randomBytes } from 'crypto';
 import { log } from '../logger.js';
+import { presence } from '../social/presence.js';
+import { invitesService } from '../social/invitesService.js';
+import { friendsService } from '../social/friendsService.js';
+import { Matchmaker } from '../matchmaking/matchmaker.js';
 import { prisma } from '../db.js';
+
+let matchmaker = null;
+
+export function initMatchmaker(io) {
+  if (matchmaker) return matchmaker;
+  matchmaker = new Matchmaker({
+    onMatch: async (entries, size) => {
+      try {
+        const sockets = entries
+          .map((e) => ({ entry: e, socket: io.sockets.sockets.get(e.socketId) }))
+          .filter((s) => s.socket && s.socket.connected);
+
+        if (sockets.length < size) {
+          // Some players disconnected — re-enqueue the survivors
+          for (const s of sockets) {
+            await matchmaker.enqueue(s.entry.userId, s.socket.id, 1200, size).catch(() => {});
+          }
+          return;
+        }
+
+        // Look up display names
+        const { prisma } = await import('../db.js');
+        const users = await prisma.user.findMany({
+          where: { id: { in: entries.map((e) => e.userId) } },
+          select: { id: true, displayName: true },
+        });
+        const nameOf = new Map(users.map((u) => [u.id, u.displayName]));
+
+        // 1) First socket creates the room
+        const first = sockets[0];
+        const hostSeatId = randomBytes(8).toString('hex');
+        const hostSeat = {
+          seatId: hostSeatId,
+          socketId: first.socket.id,
+          name: nameOf.get(first.entry.userId) || 'Player',
+          connected: true,
+          userId: first.entry.userId,
+        };
+        const room = await roomManager.createRoom(hostSeat);
+
+        // Set mode = quick_match in DB
+        await prisma.room.update({
+          where: { id: room.id },
+          data: { mode: 'quick_match' },
+        }).catch(() => {});
+        room.mode = 'quick_match';
+
+        first.socket.join(room.id);
+        first.socket.data.roomId = room.id;
+        first.socket.data.seatId = hostSeatId;
+        first.socket.data.role = 'player';
+        const hostToken = reconnectTokens.issue(room.id, hostSeatId, hostSeat.name, RECONNECT_GRACE_MS);
+        first.socket.emit(EVENTS.QUEUE_MATCHED, {
+          room: publicRoomView(room),
+          seatId: hostSeatId,
+          reconnectToken: hostToken,
+        });
+
+        // 2) Other sockets auto-join
+        for (let i = 1; i < sockets.length; i++) {
+          const { socket, entry } = sockets[i];
+          const seatId = randomBytes(8).toString('hex');
+          const seat = {
+            seatId,
+            socketId: socket.id,
+            name: nameOf.get(entry.userId) || 'Player',
+            connected: true,
+            userId: entry.userId,
+          };
+          const result = await roomManager.joinRoom(room.id, seat);
+          if (result.error) continue;
+          socket.join(room.id);
+          socket.data.roomId = room.id;
+          socket.data.seatId = seatId;
+          socket.data.role = 'player';
+          const token = reconnectTokens.issue(room.id, seatId, seat.name, RECONNECT_GRACE_MS);
+          socket.emit(EVENTS.QUEUE_MATCHED, {
+            room: publicRoomView(result.room),
+            seatId,
+            reconnectToken: token,
+          });
+          io.to(room.id).emit(EVENTS.PLAYER_JOINED, { player: { seatId, name: seat.name } });
+        }
+
+        const finalRoom = roomManager.getRoom(room.id);
+        if (!finalRoom) return;
+        broadcastRoom(io, finalRoom);
+
+        // 3) Auto-start the game (host is always entries[0])
+        const startResult = await roomManager.startGame(finalRoom.id, finalRoom.hostSeatId);
+        if (startResult.error) {
+          log.warn('matchmaker.autostart.fail', { err: startResult.error });
+          return;
+        }
+        sendAllRacks(io, startResult.room);
+        io.to(finalRoom.id).emit(EVENTS.GAME_STARTED, publicRoomView(startResult.room));
+        broadcastRoom(io, startResult.room);
+        startTurnTimer(io, startResult.room);
+      } catch (err) {
+        log.error('matchmaker.onMatch.exception', { err: String(err), stack: err?.stack });
+      }
+    },
+  });
+  matchmaker.start();
+  setInterval(() => invitesService.sweep().catch(() => {}), 60_000);
+  return matchmaker;
+}
 
 async function updateUserStatsOnGameEnd(room, gameState) {
   // Find the winning seat by highest score
@@ -125,6 +236,15 @@ function publicRoomView(room) {
       Object.entries(room.gameState.racks || {}).map(([sid, rack]) => [sid, rack.length])
     ),
     turnExpiresAt: room.turnTimer ? room.turnTimer.expiresAt : null,
+  };
+}
+
+function annotateOnline({ friends, incoming, outgoing }) {
+  const wrap = (arr) => arr.map((f) => ({ ...f, online: presence.isOnline(f.userId) }));
+  return {
+    friends: wrap(friends),
+    incoming: wrap(incoming),
+    outgoing: wrap(outgoing),
   };
 }
 
@@ -466,6 +586,20 @@ export function registerSocketHandlers(io, socket) {
     log.info('socket.disconnect', { socketId: socket.id, reason });
     rateLimiter.forget(socket.id);
     const roomId = socket.data.roomId;
+    // Phase 7: presence + queue cleanup
+    if (socket.data.userId) {
+      const result = presence.remove(socket.id);
+      if (result?.justWentOffline) {
+        friendsService.friendIdsOf(socket.data.userId).then((friendIds) => {
+          for (const fid of friendIds) {
+            for (const fsock of presence.socketsFor(fid)) {
+              io.to(fsock).emit(EVENTS.FRIENDS_UPDATE, { type: 'offline', userId: socket.data.userId });
+            }
+          }
+        }).catch(() => {});
+      }
+      matchmaker?.dequeueBySocket(socket.id).catch(() => {});
+    }
     if (!roomId) return;
 
     if (socket.data.role === 'spectator') {
@@ -506,4 +640,122 @@ export function registerSocketHandlers(io, socket) {
       broadcastRoom(io, room);
     }
   });
+  // ============================================================
+  // Phase 7: Presence
+  // ============================================================
+  if (socket.data.userId) {
+    const justOnline = presence.add(socket.data.userId, socket.id);
+    if (justOnline) {
+      // Notify all friends that we came online
+      friendsService.friendIdsOf(socket.data.userId).then((friendIds) => {
+        for (const fid of friendIds) {
+          for (const fsock of presence.socketsFor(fid)) {
+            io.to(fsock).emit(EVENTS.FRIENDS_UPDATE, { type: 'online', userId: socket.data.userId });
+          }
+        }
+      }).catch(() => {});
+    }
+
+    // On reconnect, deliver any pending game invites
+    invitesService.listIncoming(socket.data.userId).then((invites) => {
+      for (const inv of invites) {
+        socket.emit(EVENTS.GAME_INVITE_RECEIVED, {
+          inviteId: inv.id,
+          roomId: inv.roomId,
+          fromUser: inv.fromUser,
+          expiresAt: inv.expiresAt,
+        });
+      }
+    }).catch(() => {});
+  }
+
+  // ============================================================
+  // QUEUE_JOIN
+  // ============================================================
+  socket.on(EVENTS.QUEUE_JOIN, gate(socket, async ({ desiredSize } = {}, ack) => {
+    if (!socket.data.userId) return ack?.({ ok: false, error: 'Sign in to use matchmaking' });
+    const size = Number(desiredSize);
+    if (!Number.isInteger(size) || size < 2 || size > 4) {
+      return ack?.({ ok: false, error: 'Invalid size (must be 2, 3, or 4)' });
+    }
+    if (socket.data.roomId) return ack?.({ ok: false, error: 'Already in a room' });
+
+    // Snapshot the user's rating
+    const { prisma } = await import('../db.js');
+    const user = await prisma.user.findUnique({
+      where: { id: socket.data.userId },
+      select: { rating: true },
+    });
+    if (!user) return ack?.({ ok: false, error: 'User not found' });
+
+    await matchmaker.enqueue(socket.data.userId, socket.id, user.rating, size);
+    socket.data.inQueue = true;
+    socket.emit(EVENTS.QUEUE_STATE, { inQueue: true, desiredSize: size });
+    ack?.({ ok: true });
+  }));
+
+  // ============================================================
+  // QUEUE_LEAVE
+  // ============================================================
+  socket.on(EVENTS.QUEUE_LEAVE, gate(socket, async (_p, ack) => {
+    if (!socket.data.userId) return ack?.({ ok: false });
+    await matchmaker.dequeue(socket.data.userId);
+    socket.data.inQueue = false;
+    socket.emit(EVENTS.QUEUE_STATE, { inQueue: false });
+    ack?.({ ok: true });
+  }));
+
+  // ============================================================
+  // FRIEND_INVITE_RESPOND (response to a friend request)
+  // ============================================================
+  socket.on(EVENTS.FRIEND_INVITE_RESPOND, gate(socket, async ({ friendshipId, accept } = {}, ack) => {
+    if (!socket.data.userId) return ack?.({ ok: false, error: 'Sign in required' });
+    const result = await friendsService.respond(socket.data.userId, friendshipId, !!accept);
+    if (result.error) return ack?.({ ok: false, error: result.error });
+    // Notify both sides
+    const myFriendsList = await friendsService.listFor(socket.data.userId);
+    for (const sid of presence.socketsFor(socket.data.userId)) {
+      io.to(sid).emit(EVENTS.FRIENDS_UPDATE, { type: 'list', ...annotateOnline(myFriendsList) });
+    }
+    if (result.friendship && accept) {
+      const otherUserId = result.friendship.userId === socket.data.userId
+        ? result.friendship.friendId
+        : result.friendship.userId;
+      const theirFriends = await friendsService.listFor(otherUserId);
+      for (const sid of presence.socketsFor(otherUserId)) {
+        io.to(sid).emit(EVENTS.FRIENDS_UPDATE, { type: 'list', ...annotateOnline(theirFriends) });
+      }
+    }
+    ack?.({ ok: true });
+  }));
+
+  // ============================================================
+  // GAME_INVITE_RESPOND
+  // ============================================================
+  socket.on(EVENTS.GAME_INVITE_RESPOND, gate(socket, async ({ inviteId, accept } = {}, ack) => {
+    if (!socket.data.userId) return ack?.({ ok: false, error: 'Sign in required' });
+    const result = await invitesService.respond(socket.data.userId, inviteId, !!accept);
+    if (result.error) return ack?.({ ok: false, error: result.error });
+    ack?.({ ok: true, roomId: result.invite?.roomId, accepted: !!accept });
+  }));
+
+  // ============================================================
+  // Existing disconnect — extend with presence cleanup
+  // ============================================================
+  // Sends a real-time invite notification to the recipient if they're online.
+// Called from the REST route after creating the invite row.
+export function notifyGameInvite(io, invite, fromUser) {
+  for (const sid of presence.socketsFor(invite.toUserId)) {
+    io.to(sid).emit(EVENTS.GAME_INVITE_RECEIVED, {
+      inviteId: invite.id,
+      roomId: invite.roomId,
+      fromUser: {
+        id: fromUser.id,
+        displayName: fromUser.displayName,
+        avatarUrl: fromUser.avatarUrl,
+      },
+      expiresAt: invite.expiresAt,
+    });
+  }
+}
 }
