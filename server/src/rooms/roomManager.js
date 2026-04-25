@@ -4,14 +4,6 @@ import { initializeGame } from '../game/gameEngine.js';
 
 const generateRoomCode = customAlphabet('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', 6);
 
-/**
- * Players have two IDs:
- *   - socketId: changes on every connection
- *   - seatId:   stable id for the logical player slot (what turn order is keyed on)
- *
- * Rooms hold `players`, each with { seatId, socketId (or null), name, connected }.
- * Racks, scores, turnOrder all key on seatId, not socketId.
- */
 class RoomManager {
   constructor() {
     this.rooms = new Map();
@@ -25,6 +17,7 @@ class RoomManager {
       id: roomId,
       hostSeatId: hostSeat.seatId,
       players: [hostSeat],
+      spectators: [],
       gameState: {
         status: 'waiting',
         board: null,
@@ -40,9 +33,7 @@ class RoomManager {
       turnOrder: [],
       createdAt: Date.now(),
       lastActivityAt: Date.now(),
-      // pending disconnects: seatId -> timeout id for grace-period removal
       pendingDisconnects: new Map(),
-      // active turn timer (set by sockets layer)
       turnTimer: null,
     };
 
@@ -67,10 +58,6 @@ class RoomManager {
     return { room };
   }
 
-  /**
-   * Reconnect: player comes back with a valid seatId they already own in the room.
-   * Updates their socketId and marks them connected. Returns the room.
-   */
   rejoinRoom(roomId, seatId, newSocketId) {
     const room = this.rooms.get(roomId);
     if (!room) return { error: 'Room not found' };
@@ -79,7 +66,6 @@ class RoomManager {
     seat.socketId = newSocketId;
     seat.connected = true;
 
-    // Cancel pending disconnect cleanup
     const pending = room.pendingDisconnects.get(seatId);
     if (pending) {
       clearTimeout(pending);
@@ -89,10 +75,6 @@ class RoomManager {
     return { room };
   }
 
-  /**
-   * Soft disconnect: mark the seat as disconnected but keep it in the room
-   * until the grace period expires. Returns a description of what to do next.
-   */
   handleDisconnect(roomId, socketId, onGraceExpire) {
     const room = this.rooms.get(roomId);
     if (!room) return null;
@@ -102,17 +84,14 @@ class RoomManager {
     seat.connected = false;
     seat.socketId = null;
 
-    // Waiting lobby: leave immediately (no rack/score to preserve)
     if (room.gameState.status === 'waiting') {
       return this.removeSeat(roomId, seat.seatId);
     }
 
-    // In-progress / finished: keep seat for grace period
     const existing = room.pendingDisconnects.get(seat.seatId);
     if (existing) clearTimeout(existing);
 
     const timer = setTimeout(() => {
-      // Grace expired: actually remove them
       const result = this.removeSeat(roomId, seat.seatId);
       if (onGraceExpire) onGraceExpire(result);
     }, RECONNECT_GRACE_MS);
@@ -129,7 +108,6 @@ class RoomManager {
     const wasCurrentTurn = room.currentTurnSeatId === seatId;
     room.players = room.players.filter((p) => p.seatId !== seatId);
 
-    // Clear any pending timer
     const pending = room.pendingDisconnects.get(seatId);
     if (pending) {
       clearTimeout(pending);
@@ -163,9 +141,10 @@ class RoomManager {
   destroyRoom(roomId) {
     const room = this.rooms.get(roomId);
     if (!room) return;
-    // Clean up any pending timers so GC doesn't leak
     for (const t of room.pendingDisconnects.values()) clearTimeout(t);
-    if (room.turnTimer) clearTimeout(room.turnTimer);
+    if (room.turnTimer) {
+      try { room.turnTimer.cancel(); } catch {}
+    }
     this.rooms.delete(roomId);
   }
 
@@ -199,28 +178,58 @@ class RoomManager {
 
   stats() {
     return {
-      totalRooms: this.rooms.size,
-      totalPlayers: Array.from(this.rooms.values()).reduce((s, r) => s + r.players.length, 0),
-      connectedPlayers: Array.from(this.rooms.values())
-        .reduce((s, r) => s + r.players.filter((p) => p.connected).length, 0),
+    totalRooms: this.rooms.size,
+    totalPlayers: Array.from(this.rooms.values()).reduce((s, r) => s + r.players.length, 0),
+    totalSpectators: Array.from(this.rooms.values()).reduce((s, r) => s + (r.spectators?.length || 0), 0),
+    connectedPlayers: Array.from(this.rooms.values())
+      .reduce((s, r) => s + r.players.filter((p) => p.connected).length, 0),
     };
   }
+  
 
-  /**
-   * Sweep abandoned rooms. Called on an interval from index.js.
-   * A room is abandoned if: no activity for ROOM_TTL_MS AND no connected players.
-   */
   sweepAbandoned() {
     const now = Date.now();
     const toDelete = [];
     for (const [id, room] of this.rooms.entries()) {
-      const anyConnected = room.players.some((p) => p.connected);
+      const anyConnected = room.players.some((p) => p.connected) || (room.spectators?.length > 0);
       if (!anyConnected && (now - room.lastActivityAt) > ROOM_TTL_MS) {
         toDelete.push(id);
       }
     }
     toDelete.forEach((id) => this.destroyRoom(id));
     return toDelete.length;
+  }
+  // ---------- SPECTATORS ----------
+  /**
+   * Spectators don't take a seat. They join the socket.io room to receive
+   * room_state broadcasts but never get a rack, score, or turn.
+   */
+  addSpectator(roomId, spectator) {
+    const room = this.rooms.get(roomId);
+    if (!room) return { error: 'Room not found' };
+    if (!room.spectators) room.spectators = [];
+    if (room.spectators.length >= 20) return { error: 'Spectator limit reached' };
+    if (room.spectators.some((s) => s.socketId === spectator.socketId)) return { room };
+    room.spectators.push(spectator);
+    this.touch(room);
+    return { room };
+  }
+
+  removeSpectator(roomId, socketId) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    if (!room.spectators) return { room };
+    const before = room.spectators.length;
+    room.spectators = room.spectators.filter((s) => s.socketId !== socketId);
+    if (before !== room.spectators.length) this.touch(room);
+    return { room };
+  }
+
+  getSpectatorBySocketId(socketId) {
+    for (const room of this.rooms.values()) {
+      if (room.spectators?.some((s) => s.socketId === socketId)) return room;
+    }
+    return null;
   }
 }
 
