@@ -31,7 +31,7 @@ const LETTER_VALUES = {
 
 const PREMIUM_LABEL = { TW: 'TW', DW: 'DW', TL: 'TL', DL: 'DL' };
 
-export default function Board({ board, pendingPlacements, onCellClick, isMyTurn }) {
+export default function Board({ board, pendingPlacements, onCellClick, onCellDrop, isMyTurn }) {
   const pendingMap = new Map();
   (pendingPlacements || []).forEach((p) => pendingMap.set(`${p.row},${p.col}`, p));
 
@@ -39,11 +39,27 @@ export default function Board({ board, pendingPlacements, onCellClick, isMyTurn 
     ? board
     : Array.from({ length: BOARD_SIZE }, () => Array(BOARD_SIZE).fill(null));
 
+  const handleDragOver = (e) => {
+    if (!isMyTurn) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+  };
+
+  const handleDrop = (e, r, c) => {
+    if (!isMyTurn) return;
+    e.preventDefault();
+    const data = e.dataTransfer.getData('text/plain');
+    if (!data) return;
+    const parsed = parseInt(data, 10);
+    if (Number.isNaN(parsed)) return;
+    onCellDrop?.(r, c, parsed);
+  };
+
   return (
     <div className={`board ${isMyTurn ? 'active' : 'inactive'}`}>
       {safeBoard.map((row, r) => (
         <div key={r} className="board-row">
-          {row.map((cell, c) => {
+          {(row || []).map((cell, c) => {
             const pending = pendingMap.get(`${r},${c}`);
             const premium = PREMIUM_LAYOUT[r][c];
             const isCenter = r === 7 && c === 7;
@@ -76,7 +92,13 @@ export default function Board({ board, pendingPlacements, onCellClick, isMyTurn 
             ].filter(Boolean).join(' ');
 
             return (
-              <div key={c} className={classes} onClick={() => onCellClick && onCellClick(r, c)}>
+              <div
+                key={c}
+                className={classes}
+                onClick={() => onCellClick && onCellClick(r, c)}
+                onDragOver={handleDragOver}
+                onDrop={(e) => handleDrop(e, r, c)}
+              >
                 {content}
               </div>
             );
