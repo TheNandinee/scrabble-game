@@ -3,91 +3,111 @@ import Board from './Board.jsx';
 import Rack from './Rack.jsx';
 import Scoreboard from './Scoreboard.jsx';
 import GameControls from './GameControls.jsx';
+import MoveHistory from './MoveHistory.jsx';
 
 export default function Room({
-  room, rack, mySocketId,
+  room, rack, mySeatId, role,
   onLeave, onStart, onSubmitMove, onPass, onSwap,
+  playSound,
 }) {
-  const [pendingPlacements, setPendingPlacements] = useState([]); // [{row, col, letter, rackIndex, blank}]
+  const [pendingPlacements, setPendingPlacements] = useState([]);
   const [selectedRackIndex, setSelectedRackIndex] = useState(null);
   const [copied, setCopied] = useState(false);
+  // local-only rack reordering for shuffle. Maps display position -> rack index.
+  const [rackOrder, setRackOrder] = useState(null);
+
+  const isSpectator = role === 'spectator';
+  const hasRoom = room && typeof room === 'object' && typeof room.id === 'string';
 
   const shareUrl = useMemo(() => {
+    if (!hasRoom) return '';
     const base = window.location.origin + window.location.pathname;
     return `${base}?room=${room.id}`;
-  }, [room.id]);
+  }, [hasRoom, room]);
 
-  const isHost = room.hostId === mySocketId;
-  const isMyTurn = room.currentTurnPlayerId === mySocketId;
-  const gameInProgress = room.status === 'in_progress';
-  const gameFinished = room.status === 'finished';
+  const players = Array.isArray(room?.players) ? room.players : [];
+  const isHost = hasRoom && room.hostSeatId === mySeatId;
+  const isMyTurn = !isSpectator && hasRoom && room.currentTurnSeatId === mySeatId;
+  const gameInProgress = room?.status === 'in_progress';
+  const gameFinished = room?.status === 'finished';
 
-  // Clear pending placements when turn changes (e.g. move confirmed, or turn passed to us)
+  // Reset pending tiles whenever turn changes (server commits or rotates)
   useEffect(() => {
     setPendingPlacements([]);
     setSelectedRackIndex(null);
-  }, [room.currentTurnPlayerId, room.turnNumber]);
+  }, [room?.currentTurnSeatId, room?.turnNumber]);
 
-  // Tile available on the rack (excluding any already pending)
-  const availableRack = useMemo(() => {
-    const usedIndexes = new Set(pendingPlacements.map((p) => p.rackIndex));
-    return rack.map((letter, idx) => ({
-      letter, idx, used: usedIndexes.has(idx),
-    }));
-  }, [rack, pendingPlacements]);
+  // Reset shuffle order when rack actually changes (after submit/swap)
+  useEffect(() => {
+    setRackOrder(null);
+  }, [rack]);
+
+  // displayRack uses rackOrder if set, otherwise natural order
+  const displayRack = useMemo(() => {
+    const used = new Set(pendingPlacements.map((p) => p.rackIndex));
+    const base = (rack || []).map((letter, idx) => ({ letter, idx, used: used.has(idx) }));
+    if (!rackOrder || rackOrder.length !== base.length) return base;
+    // Map rackOrder[i] -> base item at that idx
+    return rackOrder.map((origIdx) => base.find((t) => t.idx === origIdx)).filter(Boolean);
+  }, [rack, pendingPlacements, rackOrder]);
+
+  const placeTileAt = useCallback((row, col, rackIdx) => {
+    if (!isMyTurn || !gameInProgress) return;
+    if (rack?.[rackIdx] === undefined) return;
+    if (room?.board && room.board[row] && room.board[row][col]) return;
+    if (pendingPlacements.some((p) => p.row === row && p.col === col)) return;
+    if (pendingPlacements.some((p) => p.rackIndex === rackIdx)) return;
+
+    let letter = rack[rackIdx], blank = false;
+    if (letter === '_') {
+      const choice = window.prompt('Enter a letter for the blank tile (A-Z):', 'A');
+      if (!choice) return;
+      const l = choice.trim().toUpperCase();
+      if (!/^[A-Z]$/.test(l)) { alert('Must be a single letter A-Z.'); return; }
+      letter = l; blank = true;
+    }
+
+    setPendingPlacements((prev) => [...prev, { row, col, letter, rackIndex: rackIdx, blank }]);
+    setSelectedRackIndex(null);
+    playSound?.('place');
+  }, [isMyTurn, gameInProgress, pendingPlacements, rack, room, playSound]);
 
   const handleCellClick = useCallback((row, col) => {
     if (!isMyTurn || !gameInProgress) return;
+    if (room?.board && room.board[row] && room.board[row][col]) return;
 
-    // Tile already on the real board (committed): ignore
-    if (room.board && room.board[row][col]) return;
-
-    // Tile we placed this turn: remove it
     const existing = pendingPlacements.find((p) => p.row === row && p.col === col);
     if (existing) {
       setPendingPlacements((prev) => prev.filter((p) => !(p.row === row && p.col === col)));
       return;
     }
 
-    // Place selected rack tile here
     if (selectedRackIndex === null) return;
-    const tile = rack[selectedRackIndex];
-    if (tile === undefined) return;
+    placeTileAt(row, col, selectedRackIndex);
+  }, [isMyTurn, gameInProgress, pendingPlacements, selectedRackIndex, room, placeTileAt]);
 
-    let letter = tile;
-    let blank = false;
-    if (tile === '_') {
-      const choice = window.prompt('Enter a letter for the blank tile (A-Z):', 'A');
-      if (!choice) return;
-      const l = choice.trim().toUpperCase();
-      if (!/^[A-Z]$/.test(l)) {
-        alert('Must be a single letter A-Z.');
-        return;
-      }
-      letter = l;
-      blank = true;
-    }
-
-    setPendingPlacements((prev) => [
-      ...prev,
-      { row, col, letter, rackIndex: selectedRackIndex, blank },
-    ]);
-    setSelectedRackIndex(null);
-  }, [isMyTurn, gameInProgress, pendingPlacements, selectedRackIndex, rack, room.board]);
+  const handleCellDrop = useCallback((row, col, rackIdx) => {
+    placeTileAt(row, col, rackIdx);
+  }, [placeTileAt]);
 
   const handleRecall = () => {
     setPendingPlacements([]);
     setSelectedRackIndex(null);
   };
 
-  const handleShuffle = () => {
-    // visual-only shuffle; server owns canonical rack order
-    setPendingPlacements([]);
+  const handleUndo = () => {
+    setPendingPlacements((prev) => prev.slice(0, -1));
     setSelectedRackIndex(null);
-    // we emit nothing — rack is what the server sent; for a persistent shuffle we'd need a server event.
-    // Simplest approach: local rack reorder via parent state isn't stored, so just leave as is.
-    // We'll instead shuffle by forcing App.jsx to track local order. For Phase 2 keep it simple.
-    alert('Shuffle is visual-only in Phase 2 — server holds canonical rack order.');
+  };
+
+  const handleShuffle = () => {
+    if (!Array.isArray(rack) || rack.length === 0) return;
+    const indices = rack.map((_, i) => i);
+    for (let i = indices.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [indices[i], indices[j]] = [indices[j], indices[i]];
+    }
+    setRackOrder(indices);
   };
 
   const handleSubmit = async () => {
@@ -103,29 +123,30 @@ export default function Room({
   };
 
   const copyCode = async () => {
-    try {
-      await navigator.clipboard.writeText(room.id);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1200);
-    } catch { /* ignore */ }
+    if (!hasRoom) return;
+    try { await navigator.clipboard.writeText(room.id); setCopied(true); setTimeout(() => setCopied(false), 1200); } catch {}
   };
-
   const copyLink = async () => {
-    try {
-      await navigator.clipboard.writeText(shareUrl);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1200);
-    } catch { /* ignore */ }
+    if (!shareUrl) return;
+    try { await navigator.clipboard.writeText(shareUrl); setCopied(true); setTimeout(() => setCopied(false), 1200); } catch {}
   };
 
-  // WAITING LOBBY VIEW
+  if (!hasRoom) {
+    return (
+      <div className="room">
+        <div className="card"><h3>Loading room...</h3></div>
+      </div>
+    );
+  }
+
+  // ---- Lobby ----
   if (!gameInProgress && !gameFinished) {
     return (
       <div className="room">
         <div className="card">
           <div className="room-header">
             <div>
-              <div className="label">Room code</div>
+              <div className="label">Room code {isSpectator && <span className="tag">spectator</span>}</div>
               <div className="code" onClick={copyCode}>{room.id}</div>
             </div>
             <div className="room-actions">
@@ -136,48 +157,62 @@ export default function Room({
             </div>
           </div>
 
-          <h3>Players ({room.players.length})</h3>
+          <h3>Players ({players.length})</h3>
           <ul className="players">
-            {room.players.map((p, i) => (
-              <li key={p.id} className={p.id === mySocketId ? 'me' : ''}>
+            {players.map((p, i) => (
+              <li key={p.seatId || i} className={p.seatId === mySeatId ? 'me' : ''}>
                 <span className="pnum">{i + 1}.</span>
                 <span className="pname">{p.name}</span>
-                {p.id === room.hostId && <span className="tag">host</span>}
-                {p.id === mySocketId && <span className="tag you">you</span>}
+                {p.seatId === room.hostSeatId && <span className="tag">host</span>}
+                {p.seatId === mySeatId && <span className="tag you">you</span>}
+                {p.connected === false && <span className="tag offline-tag">offline</span>}
               </li>
             ))}
           </ul>
 
-          {isHost ? (
+          {(room.spectatorCount || 0) > 0 && (
+            <div className="muted">👁 {room.spectatorCount} spectator{room.spectatorCount > 1 ? 's' : ''} watching</div>
+          )}
+
+          {isSpectator ? (
+            <div className="muted" style={{ marginTop: 12 }}>
+              You're spectating. The host will start the game when ready.
+            </div>
+          ) : isHost ? (
             <button
               className="btn primary"
-              disabled={room.players.length < 2}
+              disabled={players.length < 2}
               onClick={onStart}
+              style={{ marginTop: 12 }}
             >
-              {room.players.length < 2 ? 'Waiting for more players...' : 'Start Game'}
+              {players.length < 2 ? 'Waiting for more players...' : 'Start Game'}
             </button>
           ) : (
-            <div className="muted">Waiting for the host to start the game...</div>
+            <div className="muted" style={{ marginTop: 12 }}>
+              Waiting for the host to start the game...
+            </div>
           )}
         </div>
       </div>
     );
   }
 
-  // IN-GAME / FINISHED VIEW
+  // ---- Game ----
   return (
     <div className="game-shell">
       <div className="game-top">
         <div className="game-top-left">
           <div className="room-pill">Room <strong>{room.id}</strong></div>
-          <button className="btn small" onClick={copyLink}>
-            {copied ? 'Copied!' : 'Invite'}
-          </button>
+          {isSpectator && <span className="tag spectator-tag">👁 spectating</span>}
+          <button className="btn small" onClick={copyLink}>{copied ? 'Copied!' : 'Invite'}</button>
           <button className="btn small danger" onClick={onLeave}>Leave</button>
         </div>
         <div className="game-top-right">
-          <span className="bag-pill">Bag: {room.bagCount}</span>
-          <span className="turn-pill">Turn {room.turnNumber}</span>
+          {(room.spectatorCount || 0) > 0 && (
+            <span className="bag-pill">👁 {room.spectatorCount}</span>
+          )}
+          <span className="bag-pill">Bag: {room.bagCount ?? 0}</span>
+          <span className="turn-pill">Turn {room.turnNumber ?? 0}</span>
         </div>
       </div>
 
@@ -186,34 +221,37 @@ export default function Room({
           board={room.board}
           pendingPlacements={pendingPlacements}
           onCellClick={handleCellClick}
+          onCellDrop={handleCellDrop}
           isMyTurn={isMyTurn}
         />
 
         <div className="side-panel">
           <Scoreboard
-            players={room.players}
-            scores={room.scores}
-            currentTurnPlayerId={room.currentTurnPlayerId}
-            mySocketId={mySocketId}
-            rackCounts={room.rackCounts}
+            players={players}
+            scores={room.scores || {}}
+            currentTurnSeatId={room.currentTurnSeatId}
+            mySeatId={mySeatId}
+            rackCounts={room.rackCounts || {}}
           />
+          <MoveHistory history={room.moveHistory || []} players={players} />
 
           {gameFinished && (
             <div className="game-over">
               <h3>Game Over</h3>
-              <p>Final scores shown on the scoreboard.</p>
+              <p>Final scores shown above.</p>
               <button className="btn primary" onClick={onLeave}>Back to Lobby</button>
             </div>
           )}
         </div>
       </div>
 
-      {gameInProgress && (
+      {gameInProgress && !isSpectator && (
         <div className="bottom-panel">
           <Rack
-            tiles={availableRack}
+            tiles={displayRack}
             selectedIndex={selectedRackIndex}
             onSelect={(idx) => setSelectedRackIndex(idx)}
+            onShuffle={handleShuffle}
             enabled={isMyTurn}
           />
           <GameControls
@@ -221,17 +259,27 @@ export default function Room({
             pendingCount={pendingPlacements.length}
             onSubmit={handleSubmit}
             onRecall={handleRecall}
+            onUndo={handleUndo}
             onPass={onPass}
             onSwap={onSwap}
-            rack={rack}
-            bagCount={room.bagCount}
+            rack={rack || []}
+            bagCount={room.bagCount ?? 0}
+            turnExpiresAt={room.turnExpiresAt}
+            isSpectator={isSpectator}
           />
         </div>
       )}
 
-      <div className="phase-note">
-        <strong>Phase 2 note:</strong> placement, scoring, and premium squares are live. Dictionary word validation lands in Phase 3 — for now, any letters are accepted.
-      </div>
+      {gameInProgress && isSpectator && (
+        <div className="bottom-panel">
+          <GameControls
+            isMyTurn={false}
+            pendingCount={0}
+            isSpectator={true}
+            turnExpiresAt={room.turnExpiresAt}
+          />
+        </div>
+      )}
     </div>
   );
 }
