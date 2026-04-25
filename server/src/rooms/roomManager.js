@@ -3,6 +3,7 @@ import { MAX_PLAYERS, ROOM_TTL_MS, RECONNECT_GRACE_MS } from '../events.js';
 import { initializeGame } from '../game/gameEngine.js';
 import { roomStore } from './roomStore.js';
 import { log } from '../logger.js';
+import { cancelBotForRoom } from '../bot/scheduler.js';
 
 const generateRoomCode = customAlphabet('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', 6);
 
@@ -14,7 +15,6 @@ class RoomManager {
 
   /**
    * Boot-time hydration: load active rooms from DB into memory.
-   * Called once from index.js after DB connects.
    */
   async hydrate() {
     const rows = await roomStore.loadActiveRooms();
@@ -56,10 +56,8 @@ class RoomManager {
 
     this.rooms.set(roomId, room);
 
-    // Persist
     await roomStore.createRoom(room).catch((err) => {
       log.error('roomStore.createRoom.fail', { err: String(err) });
-      // If DB write fails, remove from cache to keep them in sync
       this.rooms.delete(roomId);
       throw err;
     });
@@ -85,7 +83,6 @@ class RoomManager {
 
     await roomStore.addSeat(roomId, seat, position).catch((err) => {
       log.error('roomStore.addSeat.fail', { err: String(err) });
-      // Roll back in-memory if DB write failed
       room.players = room.players.filter((p) => p.seatId !== seat.seatId);
       throw err;
     });
@@ -131,11 +128,9 @@ class RoomManager {
     seat.connected = false;
     seat.socketId = null;
 
-    // Fire-and-forget DB update
     roomStore.updateSeatConnection(seat.seatId, { socketId: null, connected: false })
       .catch((err) => log.warn('roomStore.updateSeatConnection.fail', { err: String(err) }));
 
-    // Waiting lobby: leave immediately
     if (room.gameState.status === 'waiting') {
       this.removeSeat(roomId, seat.seatId)
         .catch((err) => log.error('removeSeat.fail', { err: String(err) }));
@@ -208,6 +203,7 @@ class RoomManager {
   }
 
   destroyRoom(roomId) {
+    cancelBotForRoom(roomId);
     const room = this.rooms.get(roomId);
     if (!room) return;
     for (const t of room.pendingDisconnects.values()) clearTimeout(t);
@@ -215,7 +211,6 @@ class RoomManager {
       try { room.turnTimer.cancel(); } catch {}
     }
     this.rooms.delete(roomId);
-    // Async DB delete; cascade handles seats and moves
     roomStore.deleteRoom(roomId).catch((err) => log.warn('roomStore.deleteRoom.fail', { err: String(err) }));
   }
 
@@ -258,7 +253,6 @@ class RoomManager {
     room.currentTurnSeatId = seatIds[0];
     this.touch(room);
 
-    // Persist game start: each seat gets its rack saved
     await Promise.all([
       ...room.players.map((p) =>
         roomStore.updateSeatRack(p.seatId, room.gameState.racks[p.seatId] || [])
@@ -283,7 +277,6 @@ class RoomManager {
     room.currentTurnSeatId = nextSeatId;
     this.touch(room);
 
-    // Persist: room snapshot + per-seat racks/scores + new move row
     const seatUpdates = Object.entries(newGameState.racks || {}).map(([seatId, rack]) =>
       roomStore.updateSeatRack(seatId, rack)
     );
@@ -336,7 +329,6 @@ class RoomManager {
   }
 
   serializeGameState(gs) {
-    // Strip stuff we don't want in JSON (the racks live in seat rows)
     return {
       board: gs.board,
       bag: gs.bag,
@@ -358,14 +350,13 @@ class RoomManager {
     const now = Date.now();
     const toDelete = [];
     for (const [id, room] of this.rooms.entries()) {
-      const anyConnected = room.players.some((p) => p.connected) || (room.spectators?.length > 0);
+      const anyConnected = room.players.some((p) => p.connected && !p.isBot) || (room.spectators?.length > 0);
       if (!anyConnected && (now - room.lastActivityAt) > ROOM_TTL_MS) {
         toDelete.push(id);
       }
     }
     toDelete.forEach((id) => this.destroyRoom(id));
 
-    // Also clean up old finished rooms in DB (older than 7 days)
     const dbCleaned = await roomStore.sweepFinishedRooms(7 * 24 * 60 * 60 * 1000)
       .catch(() => 0);
 
