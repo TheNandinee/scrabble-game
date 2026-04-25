@@ -1,9 +1,5 @@
 import { TURN_DURATION_MS } from '../events.js';
 
-/**
- * Thin wrapper around setTimeout so sockets layer can cancel/reset timers
- * without remembering the handle everywhere.
- */
 export class TurnTimer {
   constructor() {
     this.handle = null;

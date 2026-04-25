@@ -20,7 +20,10 @@ export default class ErrorBoundary extends Component {
         <div className="error-boundary">
           <h2>Something went wrong</h2>
           <p className="muted">{String(this.state.error.message || this.state.error)}</p>
-          <button className="btn primary" onClick={() => window.location.reload()}>
+          <button className="btn primary" onClick={() => {
+            try { localStorage.clear(); } catch {}
+            window.location.reload();
+          }}>
             Reload
           </button>
         </div>

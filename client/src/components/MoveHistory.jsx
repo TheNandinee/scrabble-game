@@ -1,8 +1,11 @@
 export default function MoveHistory({ history, players }) {
-  const nameFor = (seatId) =>
-    players.find((p) => p.seatId === seatId)?.name || 'Unknown';
+  const safePlayers = Array.isArray(players) ? players : [];
+  const safeHistory = Array.isArray(history) ? history : [];
 
-  if (!history || history.length === 0) {
+  const nameFor = (seatId) =>
+    safePlayers.find((p) => p.seatId === seatId)?.name || 'Unknown';
+
+  if (safeHistory.length === 0) {
     return (
       <div className="card-sm move-history">
         <h3>Move History</h3>
@@ -15,7 +18,7 @@ export default function MoveHistory({ history, players }) {
     <div className="card-sm move-history">
       <h3>Move History</h3>
       <ol className="history-list">
-        {history.slice().reverse().map((entry, i) => {
+        {safeHistory.slice().reverse().map((entry, i) => {
           const key = `${entry.turn}-${i}`;
           const who = nameFor(entry.seatId);
           if (entry.type === 'move') {

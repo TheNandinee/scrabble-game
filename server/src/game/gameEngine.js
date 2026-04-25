@@ -35,10 +35,6 @@ export function advanceTurn(turnOrder, currentSeatId) {
   return turnOrder[(idx + 1) % turnOrder.length];
 }
 
-/**
- * applyMove now performs word validation atomically:
- * if ANY word is invalid, no state changes and { ok: false, invalidWords } is returned.
- */
 export function applyMove(room, seatId, placements) {
   const game = room.gameState;
   if (game.status !== 'in_progress') return { ok: false, error: 'Game not in progress' };
@@ -48,7 +44,6 @@ export function applyMove(room, seatId, placements) {
   const placement = validatePlacement(game.board, placements, rack, game.isFirstMove);
   if (!placement.ok) return { ok: false, error: placement.error };
 
-  // Apply placements to a clone (never mutate original until we're committing)
   const newBoard = cloneBoard(game.board);
   for (const p of placements) {
     newBoard[p.row][p.col] = {
@@ -61,7 +56,6 @@ export function applyMove(room, seatId, placements) {
 
   const { total, words } = scoreMove(newBoard, placements);
 
-  // Dictionary check — if any word invalid, reject the whole move
   const wordCheck = validateWords(words);
   if (!wordCheck.ok) {
     return {
@@ -71,7 +65,6 @@ export function applyMove(room, seatId, placements) {
     };
   }
 
-  // Commit: remove used tiles, refill rack
   const newRack = rack.slice();
   for (const p of placements) {
     const need = p.blank ? '_' : String(p.letter).toUpperCase();

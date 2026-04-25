@@ -1,11 +1,5 @@
-/**
- * Simple per-socket, per-event rate limiter.
- * Token bucket: `capacity` tokens, refilling at `refillPerMs`.
- * Rejects excess events quickly to protect the server from a misbehaving
- * or compromised client.
- */
 export function createSocketRateLimiter({ capacity = 10, refillMs = 1000 } = {}) {
-  const buckets = new Map(); // socketId -> { tokens, last }
+  const buckets = new Map();
 
   return {
     allow(socketId) {
@@ -15,7 +9,6 @@ export function createSocketRateLimiter({ capacity = 10, refillMs = 1000 } = {})
         b = { tokens: capacity, last: now };
         buckets.set(socketId, b);
       }
-      // Refill
       const elapsed = now - b.last;
       const refill = (elapsed / refillMs) * capacity;
       b.tokens = Math.min(capacity, b.tokens + refill);

@@ -1,22 +1,14 @@
 import { randomBytes } from 'crypto';
 
-/**
- * Short-lived token -> { roomId, seatId (stable player id) }.
- * A "seat" is the logical player slot. When a socket disconnects we keep their
- * seat in the room for RECONNECT_GRACE_MS so they can rejoin with the same
- * name, rack, and score.
- */
 class ReconnectTokens {
   constructor() {
-    this.tokens = new Map(); // token -> { roomId, seatId, name, expiresAt }
+    this.tokens = new Map();
   }
 
   issue(roomId, seatId, name, ttlMs) {
     const token = randomBytes(16).toString('hex');
     this.tokens.set(token, {
-      roomId,
-      seatId,
-      name,
+      roomId, seatId, name,
       expiresAt: Date.now() + ttlMs,
     });
     return token;
@@ -29,7 +21,6 @@ class ReconnectTokens {
       this.tokens.delete(token);
       return null;
     }
-    // one-time use: remove after successful rejoin
     this.tokens.delete(token);
     return record;
   }

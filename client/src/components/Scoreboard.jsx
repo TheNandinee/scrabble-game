@@ -1,8 +1,10 @@
 export default function Scoreboard({
   players, scores, currentTurnSeatId, mySeatId, rackCounts,
 }) {
-  const sorted = players.slice().sort(
-    (a, b) => (scores[b.seatId] || 0) - (scores[a.seatId] || 0)
+  const safePlayers = Array.isArray(players) ? players : [];
+  const safeScores = scores || {};
+  const sorted = safePlayers.slice().sort(
+    (a, b) => (safeScores[b.seatId] || 0) - (safeScores[a.seatId] || 0)
   );
 
   return (
@@ -27,7 +29,7 @@ export default function Scoreboard({
                 {isTurn && <span className="tag turn-tag">turn</span>}
                 {p.connected === false && <span className="tag offline-tag">offline</span>}
               </span>
-              <span className="score">{scores[p.seatId] || 0}</span>
+              <span className="score">{safeScores[p.seatId] || 0}</span>
               <span className="tile-count">
                 {(rackCounts && rackCounts[p.seatId] !== undefined) ? `${rackCounts[p.seatId]}🁢` : ''}
               </span>
