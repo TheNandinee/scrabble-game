@@ -1,46 +1,75 @@
 import { useEffect, useState } from 'react';
+import { loadPrefs, savePrefs } from '../localPrefs.js';
 
-export default function Home({ onCreate, onJoin }) {
+export default function Home({ onCreate, onJoin, onSpectate }) {
   const [name, setName] = useState('');
   const [roomId, setRoomId] = useState('');
+  const [mode, setMode] = useState('player'); // 'player' | 'spectator'
 
-  // Auto-fill ?room=XXXX from shareable link
   useEffect(() => {
+    const prefs = loadPrefs();
+    if (prefs.lastName) setName(prefs.lastName);
     const params = new URLSearchParams(window.location.search);
     const r = params.get('room');
     if (r) setRoomId(r.toUpperCase());
   }, []);
 
+  const persistName = (n) => {
+    setName(n);
+    savePrefs({ lastName: n.trim() });
+  };
+
   const canCreate = name.trim().length > 0;
-  const canJoin = name.trim().length > 0 && roomId.trim().length > 0;
+  const canJoin = mode === 'player'
+    ? name.trim().length > 0 && roomId.trim().length > 0
+    : roomId.trim().length > 0;
 
   return (
     <div className="home">
       <div className="card">
         <h2>Join or Create a Game</h2>
 
+        <div className="mode-toggle">
+          <button
+            className={`btn small ${mode === 'player' ? 'primary' : ''}`}
+            onClick={() => setMode('player')}
+          >
+            Play
+          </button>
+          <button
+            className={`btn small ${mode === 'spectator' ? 'primary' : ''}`}
+            onClick={() => setMode('spectator')}
+          >
+            Spectate
+          </button>
+        </div>
+
         <label className="field">
-          <span>Your name</span>
+          <span>{mode === 'spectator' ? 'Display name (optional)' : 'Your name'}</span>
           <input
             type="text"
             maxLength={20}
             value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="e.g. Alex"
+            onChange={(e) => persistName(e.target.value)}
+            placeholder={mode === 'spectator' ? 'e.g. Watcher' : 'e.g. Alex'}
           />
         </label>
 
-        <div className="row">
-          <button
-            className="btn primary"
-            disabled={!canCreate}
-            onClick={() => onCreate(name.trim())}
-          >
-            Create Room
-          </button>
-        </div>
+        {mode === 'player' && (
+          <>
+            <div className="row">
+              <button
+                className="btn primary"
+                disabled={!canCreate}
+                onClick={() => onCreate(name.trim())}
+              >
+                Create Room
+              </button>
+            </div>
 
-        <div className="divider"><span>or</span></div>
+            <div className="divider"><span>or</span></div>
+          </>
+        )}
 
         <label className="field">
           <span>Room code</span>
@@ -57,9 +86,15 @@ export default function Home({ onCreate, onJoin }) {
           <button
             className="btn"
             disabled={!canJoin}
-            onClick={() => onJoin(roomId.trim().toUpperCase(), name.trim())}
+            onClick={() => {
+              if (mode === 'spectator') {
+                onSpectate(roomId.trim().toUpperCase(), name.trim() || 'Spectator');
+              } else {
+                onJoin(roomId.trim().toUpperCase(), name.trim());
+              }
+            }}
           >
-            Join Room
+            {mode === 'spectator' ? 'Spectate Room' : 'Join Room'}
           </button>
         </div>
       </div>
