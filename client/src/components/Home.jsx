@@ -1,22 +1,26 @@
 import { useEffect, useState } from 'react';
 import { loadPrefs, savePrefs } from '../localPrefs.js';
 
-export default function Home({ onCreate, onJoin, onSpectate }) {
+export default function Home({ onCreate, onJoin, onSpectate, user, onSignInClick }) {
   const [name, setName] = useState('');
   const [roomId, setRoomId] = useState('');
-  const [mode, setMode] = useState('player'); // 'player' | 'spectator'
+  const [mode, setMode] = useState('player');
 
   useEffect(() => {
-    const prefs = loadPrefs();
-    if (prefs.lastName) setName(prefs.lastName);
+    if (user) {
+      setName(user.displayName);
+    } else {
+      const prefs = loadPrefs();
+      if (prefs.lastName) setName(prefs.lastName);
+    }
     const params = new URLSearchParams(window.location.search);
     const r = params.get('room');
     if (r) setRoomId(r.toUpperCase());
-  }, []);
+  }, [user]);
 
   const persistName = (n) => {
     setName(n);
-    savePrefs({ lastName: n.trim() });
+    if (!user) savePrefs({ lastName: n.trim() });
   };
 
   const canCreate = name.trim().length > 0;
@@ -28,6 +32,12 @@ export default function Home({ onCreate, onJoin, onSpectate }) {
     <div className="home">
       <div className="card">
         <h2>Join or Create a Game</h2>
+
+        {!user && (
+          <div className="info-banner" style={{ marginBottom: 16 }}>
+            Playing anonymously. <button className="link-btn" onClick={onSignInClick}>Sign in</button> to save your stats and game history.
+          </div>
+        )}
 
         <div className="mode-toggle">
           <button
@@ -52,6 +62,7 @@ export default function Home({ onCreate, onJoin, onSpectate }) {
             value={name}
             onChange={(e) => persistName(e.target.value)}
             placeholder={mode === 'spectator' ? 'e.g. Watcher' : 'e.g. Alex'}
+            disabled={!!user}
           />
         </label>
 
@@ -87,11 +98,8 @@ export default function Home({ onCreate, onJoin, onSpectate }) {
             className="btn"
             disabled={!canJoin}
             onClick={() => {
-              if (mode === 'spectator') {
-                onSpectate(roomId.trim().toUpperCase(), name.trim() || 'Spectator');
-              } else {
-                onJoin(roomId.trim().toUpperCase(), name.trim());
-              }
+              if (mode === 'spectator') onSpectate(roomId.trim().toUpperCase(), name.trim() || 'Spectator');
+              else onJoin(roomId.trim().toUpperCase(), name.trim());
             }}
           >
             {mode === 'spectator' ? 'Spectate Room' : 'Join Room'}

@@ -4,20 +4,41 @@ import { EVENTS } from './events.js';
 import Home from './components/Home.jsx';
 import Room from './components/Room.jsx';
 import ErrorBoundary from './components/ErrorBoundary.jsx';
+import AuthModal from './components/AuthModal.jsx';
+import Profile from './components/Profile.jsx';
+import VerifyEmail from './components/VerifyEmail.jsx';
+import ResetPassword from './components/ResetPassword.jsx';
 import { saveReconnect, loadReconnect, clearReconnect } from './reconnect.js';
 import { loadPrefs, savePrefs } from './localPrefs.js';
 import { sounds } from './sound.js';
+import { api } from './api.js';
 
 export default function App() {
   const [connected, setConnected] = useState(socket.connected);
   const [mySeatId, setMySeatId] = useState(null);
-  const [role, setRole] = useState(null); // 'player' | 'spectator' | null
+  const [role, setRole] = useState(null);
   const [room, setRoom] = useState(null);
   const [rack, setRack] = useState([]);
   const [error, setError] = useState('');
   const [toast, setToast] = useState(null);
   const [rejoinAttempted, setRejoinAttempted] = useState(false);
   const [prefs, setPrefs] = useState(() => loadPrefs());
+
+  // Auth state
+  const [user, setUser] = useState(null);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [authModalOpen, setAuthModalOpen] = useState(false);
+  const [authModalMode, setAuthModalMode] = useState('signin');
+  const [profileOpen, setProfileOpen] = useState(false);
+
+  // Routing (kept simple — single-page)
+  const [route, setRoute] = useState(() => {
+    const path = window.location.pathname;
+    if (path === '/verify-email') return 'verify';
+    if (path === '/reset-password') return 'reset';
+    return 'home';
+  });
+
   const lastNameRef = useRef('');
   const prevTurnRef = useRef(null);
 
@@ -33,13 +54,24 @@ export default function App() {
   }, [prefs.soundEnabled]);
 
   const toggleSound = useCallback(() => {
-    setPrefs((p) => {
-      const next = savePrefs({ soundEnabled: !p.soundEnabled });
-      return next;
-    });
+    setPrefs((p) => savePrefs({ soundEnabled: !p.soundEnabled }));
   }, []);
 
-  // ----- connection / rejoin -----
+  // ----- Bootstrap auth -----
+  useEffect(() => {
+    api.me()
+      .then(({ user }) => setUser(user || null))
+      .catch(() => setUser(null))
+      .finally(() => setAuthChecked(true));
+    // Show auth_error if redirected back from OAuth failure
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('auth_error')) {
+      setError('Sign in failed. Please try again.');
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, []);
+
+  // ----- Connection / rejoin -----
   useEffect(() => {
     const onConnect = () => {
       setConnected(true);
@@ -68,18 +100,16 @@ export default function App() {
       }
     };
     const onDisconnect = () => setConnected(false);
-
     socket.on('connect', onConnect);
     socket.on('disconnect', onDisconnect);
     if (socket.connected && !rejoinAttempted) onConnect();
-
     return () => {
       socket.off('connect', onConnect);
       socket.off('disconnect', onDisconnect);
     };
   }, [rejoinAttempted, flashToast]);
 
-  // ----- game events -----
+  // ----- Game events (unchanged from Phase 4) -----
   useEffect(() => {
     const onRoomState = (view) => setRoom(view);
     const onRackUpdate = ({ rack }) => setRack(rack || []);
@@ -90,17 +120,16 @@ export default function App() {
       playIfEnabled('submit');
     };
     const onMoveRejected = ({ error, invalidWords }) => {
-      if (invalidWords?.length) {
-        flashToast(`Not in dictionary: ${invalidWords.join(', ')}`, 4000);
-      } else {
-        flashToast(`Invalid move: ${error}`, 3500);
-      }
+      if (invalidWords?.length) flashToast(`Not in dictionary: ${invalidWords.join(', ')}`, 4000);
+      else flashToast(`Invalid move: ${error}`, 3500);
       playIfEnabled('reject');
     };
     const onGameEnded = ({ reason, finalScores }) => {
       flashToast(`Game over (${reason}).`, 5000);
       setRoom((r) => (r ? { ...r, status: 'finished', scores: finalScores } : r));
       playIfEnabled('win');
+      // Refresh user stats since they may have updated
+      api.me().then(({ user }) => setUser(user || null)).catch(() => {});
     };
     const onPlayerJoined = ({ player }) => flashToast(`${player.name} joined`);
     const onPlayerDisconnected = ({ seatId }) => {
@@ -146,7 +175,6 @@ export default function App() {
     };
   }, [mySeatId, flashToast, room, playIfEnabled]);
 
-  // Play "your turn" sound when it becomes your turn
   useEffect(() => {
     if (!room || role !== 'player') return;
     const nowMyTurn = room.currentTurnSeatId === mySeatId;
@@ -157,7 +185,28 @@ export default function App() {
     prevTurnRef.current = room.currentTurnSeatId;
   }, [room, mySeatId, role, playIfEnabled]);
 
-  // ----- handlers -----
+  // ----- Auth handlers -----
+  const handleAuthed = (u) => {
+    setUser(u);
+    flashToast(`Welcome, ${u.displayName}!`);
+    // Reconnect socket so the server can re-read the auth cookie
+    if (!room) {
+      socket.disconnect();
+      socket.connect();
+    }
+  };
+  const handleSignout = async () => {
+    try { await api.signout(); } catch {}
+    setUser(null);
+    setProfileOpen(false);
+    flashToast('Signed out');
+    if (!room) {
+      socket.disconnect();
+      socket.connect();
+    }
+  };
+
+  // ----- Game handlers (unchanged) -----
   const persistSession = (res, name) => {
     if (!res?.ok) return;
     saveReconnect({
@@ -167,65 +216,49 @@ export default function App() {
       name,
     });
   };
-
   const handleCreateRoom = (playerName) => {
-    setError('');
-    lastNameRef.current = playerName;
+    setError(''); lastNameRef.current = playerName;
     socket.emit(EVENTS.CREATE_ROOM, { playerName }, (res) => {
       if (!res?.ok) return setError(res?.error || 'Failed to create room');
-      setMySeatId(res.seatId);
-      setRole('player');
-      setRoom(res.room);
+      setMySeatId(res.seatId); setRole('player'); setRoom(res.room);
       persistSession(res, playerName);
     });
   };
-
   const handleJoinRoom = (roomId, playerName) => {
-    setError('');
-    lastNameRef.current = playerName;
+    setError(''); lastNameRef.current = playerName;
     socket.emit(EVENTS.JOIN_ROOM, { roomId, playerName }, (res) => {
       if (!res?.ok) return setError(res?.error || 'Failed to join room');
-      setMySeatId(res.seatId);
-      setRole('player');
-      setRoom(res.room);
+      setMySeatId(res.seatId); setRole('player'); setRoom(res.room);
       persistSession(res, playerName);
     });
   };
-
   const handleSpectateRoom = (roomId, spectatorName) => {
     setError('');
     socket.emit(EVENTS.SPECTATE_ROOM, { roomId, spectatorName }, (res) => {
-      if (!res?.ok) return setError(res?.error || 'Failed to spectate room');
-      setRoom(res.room);
-      setRole('spectator');
-      setMySeatId(null);
+      if (!res?.ok) return setError(res?.error || 'Failed to spectate');
+      setRoom(res.room); setRole('spectator'); setMySeatId(null);
     });
   };
-
   const handleLeaveRoom = () => {
     socket.emit(EVENTS.LEAVE_ROOM, {}, () => {
       setRoom(null); setRack([]); setMySeatId(null); setRole(null);
       clearReconnect();
     });
   };
-
   const handleStartGame = () => {
     setError('');
     socket.emit(EVENTS.START_GAME, {}, (res) => {
       if (!res?.ok) setError(res?.error || 'Failed to start game');
     });
   };
-
   const handleSubmitMove = (placements) => new Promise((resolve) => {
     socket.emit(EVENTS.SUBMIT_MOVE, { placements }, (res) => resolve(res));
   });
-
   const handlePass = () => {
     socket.emit(EVENTS.PASS_TURN, {}, (res) => {
       if (!res?.ok) flashToast(res?.error || 'Cannot pass');
     });
   };
-
   const handleSwap = (tiles) => new Promise((resolve) => {
     socket.emit(EVENTS.SWAP_TILES, { tiles }, (res) => {
       if (!res?.ok) flashToast(res?.error || 'Cannot swap');
@@ -233,17 +266,35 @@ export default function App() {
     });
   });
 
+  const goHome = () => {
+    setRoute('home');
+    window.history.replaceState({}, '', '/');
+  };
+
+  // ----- Render -----
   return (
     <ErrorBoundary>
       <div className="app">
         <header className="app-header">
-          <h1>Scrabble Multiplayer</h1>
+          <h1 onClick={goHome} style={{ cursor: 'pointer' }}>Scrabble Multiplayer</h1>
           <div className="header-right">
-            <button
-              className="btn small icon-btn"
-              onClick={toggleSound}
-              title={prefs.soundEnabled ? 'Mute sounds' : 'Enable sounds'}
-            >
+            {authChecked && (
+              user ? (
+                <button className="btn small user-pill" onClick={() => setProfileOpen(true)}>
+                  👤 {user.displayName}
+                </button>
+              ) : (
+                <>
+                  <button className="btn small" onClick={() => { setAuthModalMode('signin'); setAuthModalOpen(true); }}>
+                    Sign in
+                  </button>
+                  <button className="btn small primary" onClick={() => { setAuthModalMode('signup'); setAuthModalOpen(true); }}>
+                    Sign up
+                  </button>
+                </>
+              )
+            )}
+            <button className="btn small icon-btn" onClick={toggleSound} title={prefs.soundEnabled ? 'Mute' : 'Unmute'}>
               {prefs.soundEnabled ? '🔊' : '🔇'}
             </button>
             <span className={`status-dot ${connected ? 'ok' : 'bad'}`}>
@@ -255,25 +306,47 @@ export default function App() {
         {error && <div className="error-banner">{error}</div>}
         {toast && <div className="toast">{toast}</div>}
 
-        {!room ? (
-          <Home
-            onCreate={handleCreateRoom}
-            onJoin={handleJoinRoom}
-            onSpectate={handleSpectateRoom}
-          />
-        ) : (
-          <Room
-            room={room}
-            rack={rack}
-            mySeatId={mySeatId}
-            role={role}
-            onLeave={handleLeaveRoom}
-            onStart={handleStartGame}
-            onSubmitMove={handleSubmitMove}
-            onPass={handlePass}
-            onSwap={handleSwap}
-            soundEnabled={prefs.soundEnabled}
-            playSound={playIfEnabled}
+        {route === 'verify' && <VerifyEmail onDone={goHome} />}
+        {route === 'reset' && <ResetPassword onDone={goHome} onAuthed={handleAuthed} />}
+
+        {route === 'home' && (
+          !room ? (
+            <Home
+              onCreate={handleCreateRoom}
+              onJoin={handleJoinRoom}
+              onSpectate={handleSpectateRoom}
+              user={user}
+              onSignInClick={() => { setAuthModalMode('signin'); setAuthModalOpen(true); }}
+            />
+          ) : (
+            <Room
+              room={room}
+              rack={rack}
+              mySeatId={mySeatId}
+              role={role}
+              onLeave={handleLeaveRoom}
+              onStart={handleStartGame}
+              onSubmitMove={handleSubmitMove}
+              onPass={handlePass}
+              onSwap={handleSwap}
+              soundEnabled={prefs.soundEnabled}
+              playSound={playIfEnabled}
+            />
+          )
+        )}
+
+        <AuthModal
+          open={authModalOpen}
+          onClose={() => setAuthModalOpen(false)}
+          onAuthed={handleAuthed}
+          defaultMode={authModalMode}
+        />
+        {user && profileOpen && (
+          <Profile
+            user={user}
+            onClose={() => setProfileOpen(false)}
+            onUpdated={(u) => setUser(u)}
+            onSignout={handleSignout}
           />
         )}
       </div>
