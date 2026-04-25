@@ -149,3 +149,38 @@ model Friendship {
   @@index([userId, status])
   @@index([friendId, status])
 }
+
+
+// ============================================================
+// MATCHMAKING QUEUE (in-DB so it survives restart and is auditable)
+// ============================================================
+model QueueEntry {
+  id           String   @id @default(cuid())
+  userId       String
+  socketId     String
+  rating       Int                                  // snapshot of user.rating at enqueue
+  desiredSize  Int      @default(2)                 // 2 | 3 | 4 player game
+  enqueuedAt   DateTime @default(now())
+  // We remove rows from the queue when they're matched or cancelled,
+  // so this table stays small.
+
+  @@unique([userId])                                // one entry per user
+  @@index([desiredSize, rating])
+  @@index([enqueuedAt])
+}
+
+// ============================================================
+// GAME INVITATION (friend invites friend to a private room)
+// ============================================================
+model GameInvite {
+  id           String   @id @default(cuid())
+  fromUserId   String
+  toUserId     String
+  roomId       String                              // the room to join
+  status       String   @default("pending")        // pending | accepted | declined | expired
+  createdAt    DateTime @default(now())
+  expiresAt    DateTime                            // auto-expire after 5 min
+
+  @@index([toUserId, status])
+  @@index([expiresAt])
+}
