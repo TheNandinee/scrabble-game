@@ -3,6 +3,7 @@ export const EVENTS = {
   CREATE_ROOM: 'create_room',
   JOIN_ROOM: 'join_room',
   REJOIN_ROOM: 'rejoin_room',
+  SPECTATE_ROOM: 'spectate_room',
   LEAVE_ROOM: 'leave_room',
   START_GAME: 'start_game',
   SUBMIT_MOVE: 'submit_move',
@@ -16,6 +17,8 @@ export const EVENTS = {
   PLAYER_LEFT: 'player_left',
   PLAYER_DISCONNECTED: 'player_disconnected',
   PLAYER_RECONNECTED: 'player_reconnected',
+  SPECTATOR_JOINED: 'spectator_joined',
+  SPECTATOR_LEFT: 'spectator_left',
   GAME_STARTED: 'game_started',
   ROOM_STATE: 'room_state',
   RACK_UPDATE: 'rack_update',
@@ -29,12 +32,18 @@ export const EVENTS = {
 
 export const MAX_PLAYERS = 6;
 export const MIN_PLAYERS = 2;
+export const MAX_SPECTATORS = 20;
 export const BOARD_SIZE = 15;
 export const RACK_SIZE = 7;
 export const MAX_CONSECUTIVE_PASSES = 6;
 
-// Phase 3 additions
-export const TURN_DURATION_MS = 90_000;          // 90s per turn
-export const RECONNECT_GRACE_MS = 2 * 60_000;    // 2 minutes to reconnect
-export const ROOM_TTL_MS = 60 * 60_000;          // 1 hour for abandoned rooms
-export const ROOM_SWEEP_INTERVAL_MS = 60_000;    // check every minute
+export const TURN_DURATION_MS = 90_000;
+export const RECONNECT_GRACE_MS = 2 * 60_000;
+export const ROOM_TTL_MS = 60 * 60_000;
+export const ROOM_SWEEP_INTERVAL_MS = 60_000;
+
+// Phase 4: input validation limits
+export const NAME_MAX_LEN = 20;
+export const NAME_MIN_LEN = 1;
+export const ROOM_CODE_LEN = 6;
+export const MAX_PLACEMENTS_PER_MOVE = 7;
