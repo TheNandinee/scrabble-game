@@ -11,21 +11,33 @@ datasource db {
 // USER (Phase 6 will add fields; for now placeholder for FK)
 // ============================================================
 model User {
-  id           String   @id @default(cuid())
-  // Phase 6 fields (added later, nullable for Phase 5):
-  email        String?  @unique
-  passwordHash String?
-  displayName  String?
-  emailVerified Boolean @default(false)
-  // Stats (filled by Phase 6+ as games complete):
-  rating       Int      @default(1200)
-  gamesPlayed  Int      @default(0)
-  gamesWon     Int      @default(0)
-  highestScore Int      @default(0)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id                  String    @id @default(cuid())
+  email               String    @unique
+  emailLower          String    @unique
+  passwordHash        String?                                // null for OAuth-only users
+  displayName         String
+  avatarUrl           String?
+  emailVerified       Boolean   @default(false)
+  emailVerifyToken    String?   @unique
+  emailVerifyExpires  DateTime?
+  passwordResetToken  String?   @unique
+  passwordResetExpires DateTime?
 
-  // Relations
+  // OAuth
+  googleId            String?   @unique
+
+  // Stats
+  rating              Int       @default(1200)
+  gamesPlayed         Int       @default(0)
+  gamesWon            Int       @default(0)
+  highestScore        Int       @default(0)
+  totalScore          Int       @default(0)
+
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  lastLoginAt         DateTime?
+
+  // Relations (already exist from Phase 5)
   hostedRooms   Room[]   @relation("HostedRooms")
   seats         Seat[]
   movesMade     Move[]
@@ -33,6 +45,7 @@ model User {
   friends       Friendship[] @relation("UserFriends")
 
   @@index([rating])
+  @@index([emailLower])
 }
 
 // ============================================================
