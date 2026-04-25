@@ -3,6 +3,7 @@ import http from 'http';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
+import cookieParser from 'cookie-parser';
 import { Server as SocketIOServer } from 'socket.io';
 import { registerSocketHandlers } from './sockets/socketHandlers.js';
 import { roomManager } from './rooms/roomManager.js';
@@ -11,6 +12,9 @@ import { dictionarySize } from './game/dictionary.js';
 import { ROOM_SWEEP_INTERVAL_MS } from './events.js';
 import { log } from './logger.js';
 import { prisma } from './db.js';
+import authRoutes from './auth/routes.js';
+import googleRoutes from './auth/google.js';
+import { attachUser, authenticateSocket } from './auth/middleware.js';
 
 const PORT = process.env.PORT || 4000;
 const allowedOrigins = (process.env.CLIENT_ORIGIN || 'http://localhost:5173')
@@ -19,16 +23,15 @@ const allowedOrigins = (process.env.CLIENT_ORIGIN || 'http://localhost:5173')
 const app = express();
 app.use(helmet({ contentSecurityPolicy: false, crossOriginResourcePolicy: false }));
 app.use(cors({ origin: allowedOrigins, credentials: true }));
-app.use(express.json({ limit: '16kb' }));
+app.use(express.json({ limit: '32kb' }));
+app.use(cookieParser());
+app.use(attachUser);
 
 app.get('/', (_req, res) => res.json({ service: 'scrabble-server', status: 'ok' }));
 
 app.get('/health', async (_req, res) => {
   let dbOk = false;
-  try {
-    await prisma.$queryRaw`SELECT 1`;
-    dbOk = true;
-  } catch {}
+  try { await prisma.$queryRaw`SELECT 1`; dbOk = true; } catch {}
   res.json({
     status: dbOk ? 'ok' : 'degraded',
     db: dbOk,
@@ -38,6 +41,9 @@ app.get('/health', async (_req, res) => {
     memoryMb: Math.round(process.memoryUsage().rss / 1024 / 1024),
   });
 });
+
+app.use('/auth', authRoutes);
+app.use('/auth', googleRoutes);
 
 const httpServer = http.createServer(app);
 const io = new SocketIOServer(httpServer, {
@@ -49,7 +55,10 @@ const io = new SocketIOServer(httpServer, {
 });
 
 io.on('connection', (socket) => {
-  log.info('socket.connect', { socketId: socket.id });
+  // Phase 6: try to attach a userId from the auth cookie sent during the handshake
+  const userId = authenticateSocket(socket);
+  socket.data.userId = userId;
+  log.info('socket.connect', { socketId: socket.id, userId: userId || 'anon' });
   registerSocketHandlers(io, socket);
 });
 
@@ -58,22 +67,16 @@ const sweepInterval = setInterval(async () => {
     const removed = await roomManager.sweepAbandoned();
     reconnectTokens.sweep();
     if (removed > 0) log.info('rooms.sweep', { removed });
-  } catch (err) {
-    log.error('sweep.error', { err: String(err) });
-  }
+  } catch (err) { log.error('sweep.error', { err: String(err) }); }
 }, ROOM_SWEEP_INTERVAL_MS);
 
-// Boot sequence: hydrate from DB *before* accepting connections
 async function boot() {
   await roomManager.hydrate();
   httpServer.listen(PORT, () => {
     log.info('server.listen', { port: PORT, origins: allowedOrigins });
   });
 }
-boot().catch((err) => {
-  log.error('server.boot.fail', { err: String(err) });
-  process.exit(1);
-});
+boot().catch((err) => { log.error('server.boot.fail', { err: String(err) }); process.exit(1); });
 
 function shutdown(signal) {
   log.info('server.shutdown.start', { signal });

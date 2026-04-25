@@ -9,6 +9,38 @@ import { TurnTimer } from '../game/turnTimer.js';
 import { createSocketRateLimiter } from '../middleware/rateLimiter.js';
 import { randomBytes } from 'crypto';
 import { log } from '../logger.js';
+import { prisma } from '../db.js';
+
+async function updateUserStatsOnGameEnd(room, gameState) {
+  // Find the winning seat by highest score
+  const seats = room.players.map((p) => ({
+    seatId: p.seatId,
+    userId: p.userId,
+    score: gameState.scores[p.seatId] || 0,
+  }));
+  if (seats.length === 0) return;
+  const maxScore = Math.max(...seats.map((s) => s.score));
+  const winners = seats.filter((s) => s.score === maxScore);
+
+  for (const seat of seats) {
+    if (!seat.userId) continue;
+    const won = winners.length === 1 && winners[0].seatId === seat.seatId;
+    await prisma.user.update({
+      where: { id: seat.userId },
+      data: {
+        gamesPlayed: { increment: 1 },
+        gamesWon: won ? { increment: 1 } : undefined,
+        totalScore: { increment: seat.score },
+        highestScore: { set: undefined }, // we'll handle below
+      },
+    });
+    // Bump highestScore if this score beats it
+    const u = await prisma.user.findUnique({ where: { id: seat.userId } });
+    if (u && seat.score > u.highestScore) {
+      await prisma.user.update({ where: { id: seat.userId }, data: { highestScore: seat.score } });
+    }
+  }
+}
 
 const rateLimiter = createSocketRateLimiter({ capacity: 15, refillMs: 1000 });
 
@@ -182,7 +214,12 @@ export function registerSocketHandlers(io, socket) {
     if (!name) return ack?.({ ok: false, error: 'Invalid name' });
 
     const seatId = newSeatId();
-    const seat = { seatId, socketId: socket.id, name, connected: true };
+    const seat = { seatId, 
+      socketId: socket.id, 
+      name, 
+      connected: true,
+      userId: socket.data.userId || null,
+    };
     const room = await roomManager.createRoom(seat);
 
     socket.join(room.id);
@@ -203,7 +240,7 @@ export function registerSocketHandlers(io, socket) {
     if (!name) return ack?.({ ok: false, error: 'Invalid name' });
 
     const seatId = newSeatId();
-    const seat = { seatId, socketId: socket.id, name, connected: true };
+    const seat = { seatId, socketId: socket.id, name, connected: true, userId: socket.data.userId || null };
     const result = await roomManager.joinRoom(id, seat);
     if (result.error) return ack?.({ ok: false, error: result.error });
 
@@ -359,11 +396,11 @@ export function registerSocketHandlers(io, socket) {
     broadcastRoom(io, room);
 
     if (result.newGameState.status === 'finished') {
+      await updateUserStatsOnGameEnd(room, result.newGameState).catch((err) =>
+        log.error('stats.update.fail', { err: String(err) }));
       io.to(roomId).emit(EVENTS.GAME_ENDED, {
         reason: result.endReason,
-        finalScores: result.newGameState.scores,
-      });
-      cancelTurnTimer(room);
+        finalScores: result.newGameState.scores,  });
     } else {
       startTurnTimer(io, room);
     }
