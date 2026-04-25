@@ -12,6 +12,10 @@ import { saveReconnect, loadReconnect, clearReconnect } from './reconnect.js';
 import { loadPrefs, savePrefs } from './localPrefs.js';
 import { sounds } from './sound.js';
 import { api } from './api.js';
+import ModeSelect from './components/ModeSelect.jsx';
+import FriendsPanel from './components/FriendsPanel.jsx';
+import QueuePanel from './components/QueuePanel.jsx';
+import GameInviteToast from './components/GameInviteToast.jsx';
 
 export default function App() {
   const [connected, setConnected] = useState(socket.connected);
@@ -23,6 +27,8 @@ export default function App() {
   const [toast, setToast] = useState(null);
   const [rejoinAttempted, setRejoinAttempted] = useState(false);
   const [prefs, setPrefs] = useState(() => loadPrefs());
+  const [friendsOpen, setFriendsOpen] = useState(false);
+  const [queueOpen, setQueueOpen] = useState(false);
 
   // Auth state
   const [user, setUser] = useState(null);
@@ -109,7 +115,7 @@ export default function App() {
     };
   }, [rejoinAttempted, flashToast]);
 
-  // ----- Game events (unchanged from Phase 4) -----
+  // ----- Game events -----
   useEffect(() => {
     const onRoomState = (view) => setRoom(view);
     const onRackUpdate = ({ rack }) => setRack(rack || []);
@@ -147,6 +153,19 @@ export default function App() {
       flashToast(`${name} timed out`, 2500);
     };
     const onGameStarted = (view) => { setRoom(view); flashToast('Game started!'); };
+    const onQueueMatched = (msg) => {
+      setMySeatId(msg.seatId);
+      setRole('player');
+      setRoom(msg.room);
+      setQueueOpen(false);
+      saveReconnect({
+        roomId: msg.room.id,
+        seatId: msg.seatId,
+        reconnectToken: msg.reconnectToken,
+        name: user?.displayName || 'Player',
+      });
+      flashToast('Match found!');
+    };
 
     socket.on(EVENTS.ROOM_STATE, onRoomState);
     socket.on(EVENTS.RACK_UPDATE, onRackUpdate);
@@ -159,6 +178,7 @@ export default function App() {
     socket.on(EVENTS.SPECTATOR_JOINED, onSpectatorJoined);
     socket.on(EVENTS.TURN_TIMEOUT, onTurnTimeout);
     socket.on(EVENTS.GAME_STARTED, onGameStarted);
+    socket.on(EVENTS.QUEUE_MATCHED, onQueueMatched);
 
     return () => {
       socket.off(EVENTS.ROOM_STATE, onRoomState);
@@ -172,8 +192,9 @@ export default function App() {
       socket.off(EVENTS.SPECTATOR_JOINED, onSpectatorJoined);
       socket.off(EVENTS.TURN_TIMEOUT, onTurnTimeout);
       socket.off(EVENTS.GAME_STARTED, onGameStarted);
+      socket.off(EVENTS.QUEUE_MATCHED, onQueueMatched);
     };
-  }, [mySeatId, flashToast, room, playIfEnabled]);
+  }, [mySeatId, flashToast, room, playIfEnabled, user]);
 
   useEffect(() => {
     if (!room || role !== 'player') return;
@@ -206,7 +227,7 @@ export default function App() {
     }
   };
 
-  // ----- Game handlers (unchanged) -----
+  // ----- Game handlers -----
   const persistSession = (res, name) => {
     if (!res?.ok) return;
     saveReconnect({
@@ -266,6 +287,19 @@ export default function App() {
     });
   });
 
+  // ----- Phase 7 mode-pick handlers -----
+  const handlePickFriend = ({ joinCode } = {}) => {
+    if (joinCode) {
+      handleJoinRoom(joinCode, user?.displayName || prefs.lastName || 'Player');
+    } else {
+      handleCreateRoom(user?.displayName || prefs.lastName || 'Player');
+    }
+  };
+
+  const handleAcceptGameInvite = (roomId) => {
+    handleJoinRoom(roomId, user?.displayName || prefs.lastName || 'Player');
+  };
+
   const goHome = () => {
     setRoute('home');
     window.history.replaceState({}, '', '/');
@@ -280,9 +314,14 @@ export default function App() {
           <div className="header-right">
             {authChecked && (
               user ? (
-                <button className="btn small user-pill" onClick={() => setProfileOpen(true)}>
-                  👤 {user.displayName}
-                </button>
+                <>
+                  <button className="btn small" onClick={() => setFriendsOpen(true)}>
+                    👥 Friends
+                  </button>
+                  <button className="btn small user-pill" onClick={() => setProfileOpen(true)}>
+                    👤 {user.displayName}
+                  </button>
+                </>
               ) : (
                 <>
                   <button className="btn small" onClick={() => { setAuthModalMode('signin'); setAuthModalOpen(true); }}>
@@ -309,30 +348,31 @@ export default function App() {
         {route === 'verify' && <VerifyEmail onDone={goHome} />}
         {route === 'reset' && <ResetPassword onDone={goHome} onAuthed={handleAuthed} />}
 
-        {route === 'home' && (
-          !room ? (
-            <Home
-              onCreate={handleCreateRoom}
-              onJoin={handleJoinRoom}
-              onSpectate={handleSpectateRoom}
-              user={user}
-              onSignInClick={() => { setAuthModalMode('signin'); setAuthModalOpen(true); }}
-            />
-          ) : (
-            <Room
-              room={room}
-              rack={rack}
-              mySeatId={mySeatId}
-              role={role}
-              onLeave={handleLeaveRoom}
-              onStart={handleStartGame}
-              onSubmitMove={handleSubmitMove}
-              onPass={handlePass}
-              onSwap={handleSwap}
-              soundEnabled={prefs.soundEnabled}
-              playSound={playIfEnabled}
-            />
-          )
+        {route === 'home' && !room && (
+          <ModeSelect
+            user={user}
+            onPickFriend={handlePickFriend}
+            onPickQuickMatch={() => setQueueOpen(true)}
+            onPickComputer={() => flashToast('Computer opponent coming in Phase 8!')}
+            onSpectate={(code) => handleSpectateRoom(code, user?.displayName || 'Spectator')}
+            onSignInClick={() => { setAuthModalMode('signin'); setAuthModalOpen(true); }}
+          />
+        )}
+
+        {route === 'home' && room && (
+          <Room
+            room={room}
+            rack={rack}
+            mySeatId={mySeatId}
+            role={role}
+            onLeave={handleLeaveRoom}
+            onStart={handleStartGame}
+            onSubmitMove={handleSubmitMove}
+            onPass={handlePass}
+            onSwap={handleSwap}
+            soundEnabled={prefs.soundEnabled}
+            playSound={playIfEnabled}
+          />
         )}
 
         <AuthModal
@@ -349,6 +389,18 @@ export default function App() {
             onSignout={handleSignout}
           />
         )}
+
+        <FriendsPanel
+          open={friendsOpen}
+          onClose={() => setFriendsOpen(false)}
+          currentRoomId={room?.id || null}
+        />
+        <QueuePanel
+          open={queueOpen}
+          onClose={() => setQueueOpen(false)}
+          onMatched={(_msg) => { /* handled by socket listener */ }}
+        />
+        <GameInviteToast onAccept={handleAcceptGameInvite} />
       </div>
     </ErrorBoundary>
   );
